@@ -86,8 +86,10 @@ def repair_nan_values(data):
         nan_mask = np.isnan(signal)
 
         if np.any(nan_mask):
-
             valid_indices = np.where(~nan_mask)[0]
+            if len(valid_indices) == 0:
+                raise ValueError(f"Column {col} contains only Nans")
+
 
             signal[nan_mask] = np.interp(
                 np.where(nan_mask)[0],
@@ -261,14 +263,14 @@ def run_master_eskf_pipeline(imu_stream):
     # Step C: Sequential IMU Integration Loop
     # --------------------------------------------------------------------------
     freeze_counter = 0
+    EXPECTED_DT = 0.005
     for i in range(1, num_frames):
         t_prev = imu_stream[i - 1, 0]
         t_curr = imu_stream[i, 0]
         dt = t_curr - t_prev
-        EXPECTED_DT = 0.005
 
         dropout_detected = (
-            dt > 3 * EXPECTED_DT
+            dt > 5 * EXPECTED_DT
         )
 
         if dropout_detected:
@@ -295,7 +297,7 @@ def run_master_eskf_pipeline(imu_stream):
 
         if np.allclose(
             imu_stream[i, 1:7],
-            imu_stream[i,-1,1:7], atol=1e-10):
+            imu_stream[i-1,1:7], atol=1e-10):
             freeze_counter +=1
         else:
             freeze_counter =0
@@ -307,7 +309,7 @@ def run_master_eskf_pipeline(imu_stream):
             print(f"Accelerometer blackout detected at frame {i}")
             continue
         gyro_norm = np.linalg.norm(gyro_raw)
-        if gyro_norm < 1e-8:
+        if gyro_norm < 1e-5:
             print(f"Gyroscope blackout detected at frame {i}")
 
         MAX_ACCEL = 50.0
