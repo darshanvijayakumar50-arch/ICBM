@@ -50,6 +50,55 @@ def skew_symmetric(v):
         [-v[1], v[0], 0.0]
     ], dtype=np.float64)
 
+# DATA VALIDATION ANDD REPAIR FUNNCTIONS
+
+def validate_imu_stream(imu_stream):
+
+    if imu_stream.ndim != 2:
+        raise ValueError("IMU stream must be 2D")
+
+    if imu_stream.shape[1] != 7:
+        raise ValueError(
+            "Expected [time, ax, ay, az, gx, gy, gz]"
+        )
+
+    if len(imu_stream) < 2:
+        raise ValueError(
+            "Insufficient IMU samples"
+        )
+
+    if np.isnan(imu_stream[:,0]).any():
+        raise ValueError(
+            "Timestamp column contains NaN"
+        )
+
+    return True
+
+
+def repair_nan_values(data):
+
+    data = data.copy()
+
+    for col in range(data.shape[1]):
+
+        signal = data[:, col]
+
+        nan_mask = np.isnan(signal)
+
+        if np.any(nan_mask):
+
+            valid_indices = np.where(~nan_mask)[0]
+
+            signal[nan_mask] = np.interp(
+                np.where(nan_mask)[0],
+                valid_indices,
+                signal[valid_indices]
+            )
+
+            data[:, col] = signal
+
+    return data
+
 
 # ==============================================================================
 # 2. ESKF PIPELINE MODULES
@@ -58,7 +107,7 @@ def skew_symmetric(v):
 def initialize_alignment(imu_data, num_samples=50):
     """Calculates T=0 orientation quaternion from static gravity vector."""
     accel_samples = imu_data[:num_samples, 1:4] # Assuming cols: [time, ax, ay, az, ...]
-    mean_accel = np.mean(accel_samples, axis=0)
+    mean_accel = np.median(accel_samples, axis=0)
     ax, ay, az = mean_accel
 
     roll = np.arctan2(ay, az)
@@ -84,9 +133,10 @@ def eskf_predict(state, acc_raw, gyro_raw, P, dt, g_world=np.array([0.0, 0.0, 9.
     v_next = v + acc_world * dt
 
     omega = gyro_unbiased
-    angle = np.linalg.norm(omega) * dt
-    if angle > 1e-8:
-        axis = omega / angle
+    omega_norm = np.linalg.norm(omega)
+    angle = omega_norm * dt
+    if omega_norm > 1e-8:
+        axis = omega / omega_norm
         dq_vec = axis * np.sin(0.5 * angle)
         dq_w = np.cos(0.5 * angle)
     else:
@@ -172,6 +222,11 @@ def run_master_eskf_pipeline(imu_stream):
     imu_stream: Nx7 numpy array [timestamp, ax, ay, az, gx, gy, gz]
     Returns: Nx8 numpy array [timestamp, x, y, z, qx, qy, qz, qw]
     """
+    validate_imu_stream(imu_stream)
+
+    imu_stream = repair_nan_values(
+        imu_stream
+    )
     num_frames = imu_stream.shape[0]
     
     # --------------------------------------------------------------------------
@@ -205,10 +260,30 @@ def run_master_eskf_pipeline(imu_stream):
     # --------------------------------------------------------------------------
     # Step C: Sequential IMU Integration Loop
     # --------------------------------------------------------------------------
+    freeze_counter = 0
     for i in range(1, num_frames):
         t_prev = imu_stream[i - 1, 0]
         t_curr = imu_stream[i, 0]
         dt = t_curr - t_prev
+        EXPECTED_DT = 0.005
+
+        dropout_detected = (
+            dt > 3 * EXPECTED_DT
+        )
+
+        if dropout_detected:
+
+            print(f"Dropout detected at frame {i}")
+            P *= 2.0
+        if dt > 1.0:
+
+            print(f"Long blackout detected at frame {i}")
+            P *= 10.0
+
+            trajectory_output[i, 0] = t_curr
+            trajectory_output[i, 1:4] = state['pos']
+            trajectory_output[i, 4:8] = state['q']
+            continue
         
         # Guard against zero or corrupted time step deltas
         if dt <= 0:
@@ -216,14 +291,43 @@ def run_master_eskf_pipeline(imu_stream):
 
         acc_raw = imu_stream[i, 1:4]
         gyro_raw = imu_stream[i, 4:7]
+        # Sensor Freeze detection
+
+        if np.allclose(
+            imu_stream[i, 1:7],
+            imu_stream[i,-1,1:7], atol=1e-10):
+            freeze_counter +=1
+        else:
+            freeze_counter =0
+        if freeze_counter > 100:
+            print(f"Sensor freeze detected at frame {i}")
+        # Accelerometer and gyroscope  blackout detection
+        acc_norm = np.linalg.norm(acc_raw)
+        if acc_norm < 0.1:
+            print(f"Accelerometer blackout detected at frame {i}")
+            continue
+        gyro_norm = np.linalg.norm(gyro_raw)
+        if gyro_norm < 1e-8:
+            print(f"Gyroscope blackout detected at frame {i}")
+
+        MAX_ACCEL = 50.0
+        MAX_GYRO = 20.0
+
+        if np.linalg.norm(acc_raw) > MAX_ACCEL:
+            print(f"Accelerometer outlier at frame {i}")
+            continue
+
+        if np.linalg.norm(gyro_raw) > MAX_GYRO:
+            print(f"Gyroscope outlier at frame {i}")
+            continue
 
         # 1. State & Covariance Prediction
         state, P = eskf_predict(state, acc_raw, gyro_raw, P, dt)
-
-        # 2. Optional Measurement Update (e.g., ZUPT zero-velocity correction)
-        # If stationary, construct delta_x via Kalman gain K and update P:
-        # delta_x = K @ innovation; state, P = eskf_inject_error(state, delta_x, P)
-
+        #Zero Velocity Update(ZUPT) detection
+        stationary= (abs(acc_norm-9.81)<0.15) and (gyro_norm<0.02)
+        if stationary:
+            state['vel'][:] =0.0
+        
         # 3. Store Computed Pose in Hackathon CSV Output Format
         trajectory_output[i, 0] = t_curr
         trajectory_output[i, 1:4] = state['pos']
