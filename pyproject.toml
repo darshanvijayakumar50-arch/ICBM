@@ -1,0 +1,20 @@
+[project]
+name = "icbm"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Pragadheesh A", email = "pragadheeshanand@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "numpy>=2.5.5",
+    "pandas>=3.1.1",
+]
+
+[project.scripts]
+icbm = "icbm:main"
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14.0"]
+build-backend = "uv_build"

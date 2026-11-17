@@ -321,7 +321,7 @@ def eskf_gravity_tilt_update(state, acc_raw, P):
     R_meas = np.eye(3) * (0.35 ** 2)
     S = H @ P @ H.T + R_meas
     K = P @ H.T @ np.linalg.inv(S)
-    delta_x = K @ r
+    delta_x = K @ r_acc
 
     I_KH = np.eye(15) - K @ H
     P_upd = I_KH @ P @ I_KH.T + K @ R_meas @ K.T
