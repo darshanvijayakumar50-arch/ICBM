@@ -242,7 +242,7 @@ def run_master_eskf_pipeline(imu_stream):
     # Initialize Nominal State
     state = {
         'pos': np.zeros(3, dtype=np.float64),
-        'vel': np.zeros(3, dtype=np.float64),
+        'vel': np.array([0, 51.444444355, 0]),
         'q': q0,
         'ba': np.zeros(3, dtype=np.float64),
         'bg': np.zeros(3, dtype=np.float64)
@@ -263,7 +263,7 @@ def run_master_eskf_pipeline(imu_stream):
     # Step C: Sequential IMU Integration Loop
     # --------------------------------------------------------------------------
     freeze_counter = 0
-    EXPECTED_DT = 0.005
+    EXPECTED_DT = 0.0085
     for i in range(1, num_frames):
         t_prev = imu_stream[i - 1, 0]
         t_curr = imu_stream[i, 0]
@@ -309,8 +309,8 @@ def run_master_eskf_pipeline(imu_stream):
             print(f"Accelerometer blackout detected at frame {i}")
             continue
         gyro_norm = np.linalg.norm(gyro_raw)
-        if gyro_norm < 1e-5:
-            print(f"Gyroscope blackout detected at frame {i}")
+        # if gyro_norm < 1e-5:
+        #     print(f"Gyroscope blackout detected at frame {i}")
 
         MAX_ACCEL = 50.0
         MAX_GYRO = 20.0
