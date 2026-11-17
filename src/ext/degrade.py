@@ -28,6 +28,10 @@ Usage
                           [--gyro-deg] [--meta <stats.json>]
 """
 
+"""
+This code was given by the oranizers and are not authored orignially by this repo's developers
+"""
+
 import argparse
 import json
 import sys

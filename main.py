@@ -454,7 +454,7 @@ def main():
         gyro_deg=args.gyro_deg,
     )
 
-    out_cols = ["time", "ax", "ay", "az", "qx", "qy", "qz", "qw"]
+    out_cols = ["time", "tx", "ty", "tz", "qx", "qy", "qz", "qw"]
     out_df = pd.DataFrame(traj, columns=out_cols)
     out_df.to_csv(args.output, index=False, float_format="%.6f")
     print(f"Saved trajectory ({len(out_df)} rows) -> {args.output}")
