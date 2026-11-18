@@ -10,13 +10,13 @@ from pathlib import Path
 # Supported CSV column names, including EuRoC ground-truth names.
 ALIASES = {
     "timestamp": ["timestamp", "time", "#timestamp"],
-    "tx": ["tx", "x", "p_rs_r_x", "position_x"],
-    "ty": ["ty", "y", "p_rs_r_y", "position_y"],
-    "tz": ["tz", "z", "p_rs_r_z", "position_z"],
-    "qx": ["qx", "q_x", "q_rs_x"],
-    "qy": ["qy", "q_y", "q_rs_y"],
-    "qz": ["qz", "q_z", "q_rs_z"],
-    "qw": ["qw", "q_w", "q_rs_w"],
+    "tx": ["tx", "x", "p_rs_r_x","p_rs_r_x [m]", "position_x"],
+    "ty": ["ty", "y", "p_rs_r_y","p_rs_r_y [m]", "position_y"],
+    "tz": ["tz", "z", "p_rs_r_z","p_rs_r_z [m]", "position_z"],
+    "qx": ["qx", "q_x", "q_rs_x","q_rs_x []"],
+    "qy": ["qy", "q_y", "q_rs_y","q_rs_y []"],
+    "qz": ["qz", "q_z", "q_rs_z","q_rs_z []"],
+    "qw": ["qw", "q_w", "q_rs_w","q_rs_w []"],
 }
 
 
