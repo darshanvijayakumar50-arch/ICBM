@@ -399,37 +399,12 @@ def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro
         imu_stream, ts_unit, accel_unit, gyro_deg, exact_int_ts=exact_int_ts
     )
     n = len(data)
-
-    # Detect sensor blackout / zero-filled samples
-    acc_norm = np.linalg.norm(data[:, 1:4], axis=1)
-    gyro_norm = np.linalg.norm(data[:, 4:7], axis=1)
-
-    zero_mask = (acc_norm < 0.1) & (gyro_norm < 1e-4)
-
-    # Find the beginning of the trailing zero region
-    valid_end = n
-
-    while valid_end > 0 and zero_mask[valid_end - 1]:
-        valid_end -= 1
-
-    if valid_end == 0:
-        raise ValueError("No valid IMU measurements found")
-
-    blackout_start = valid_end
-
-    print(f"Last valid IMU index: {valid_end - 1}")
-    print(f"Blackout starts at index: {blackout_start}")
-    print(f"Blackout duration: {ts_sec[-1] - ts_sec[blackout_start]:.3f}s")
-    
     diffs = np.diff(ts_sec)
     expected_dt = float(np.median(diffs[diffs > 0])) if np.any(diffs > 0) else 0.005
 
     trajectory_output = np.zeros((n, 8), dtype=np.float64)
 
-    q0, bg0 = initialize_alignment(
-        data[:valid_end],
-        ts_sec[:valid_end]
-    )   
+    q0, bg0 = initialize_alignment(data, ts_sec)
     state = {
         "pos": np.zeros(3, dtype=np.float64),
         "vel": np.zeros(3, dtype=np.float64),
@@ -457,7 +432,7 @@ def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro
     acc_buf = [data[0, 1:4].copy()]
     gyr_buf = [data[0, 4:7].copy()]
 
-    for i in range(1, valid_end):
+    for i in range(1, n):
         dt = ts_sec[i] - ts_sec[i - 1]
 
         # 1. Duplicated rows (dt == 0)
