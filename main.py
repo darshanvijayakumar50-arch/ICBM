@@ -433,10 +433,12 @@ def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro
     last_valid_acc = data[0, 1:4].copy()
     last_valid_gyr = data[0, 4:7].copy()
     consecutive_rejections = 0
+    frozen_count = 0
 
     shoe_win = max(15, min(40, int(round(0.25 / expected_dt))))
     acc_buf = [data[0, 1:4].copy()]
     gyr_buf = [data[0, 4:7].copy()]
+    vel_buf = [state["vel"].copy()]
 
     for i in range(1, n):
         dt = ts_sec[i] - ts_sec[i - 1]
@@ -466,6 +468,23 @@ def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro
 
         # 3. Stuck / Frozen Sample Detection
         is_frozen = np.allclose(data[i, 1:7], data[i - 1, 1:7], atol=1e-9)
+        if is_frozen:
+            frozen_count += 1
+        else:
+            frozen_count = 0
+
+        if frozen_count >= 3:
+            # Sensor stream is dead/stuck: damp velocity instead of integrating stale acceleration
+            state["vel"] *= np.exp(-5.0 * dt)
+            if np.linalg.norm(state["vel"]) < 0.05:
+                state["vel"][:] = 0.0
+            state["pos"] += state["vel"] * dt
+            P[0:9, 0:9] *= 1.005
+            trajectory_output[i, 0] = raw_ts[i]
+            trajectory_output[i, 1:4] = state["pos"]
+            trajectory_output[i, 4:8] = state["q"]
+            continue
+
         if is_frozen:
             acc_raw = last_valid_acc
             gyro_raw = last_valid_gyr
@@ -523,12 +542,17 @@ def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro
         trajectory_output[i, 1:4] = state["pos"]
         trajectory_output[i, 4:8] = state["q"]
 
+        vel_buf.append(state["vel"].copy())
+        if len(vel_buf) > shoe_win:
+            vel_buf.pop(0)
+
+    state["vel"] = np.median(vel_buf, axis=0)
     return trajectory_output, state, expected_dt, ts_scale
 
 
 def predict_future_5s(final_state, last_timestamp, imu_dt,
-                      horizon=5.0, prev_q=None, ts_scale=1.0):
-    """Constant-velocity, constant-orientation prediction."""
+                      horizon=5.0, prev_q=None, ts_scale=1.0, decay_rate=0.75):
+    """Exponentially damped velocity, constant-orientation prediction."""
     position = np.asarray(final_state["pos"], dtype=float).reshape(-1)
     velocity = np.asarray(final_state["vel"], dtype=float).reshape(-1)
     quaternion = np.asarray(final_state["q"], dtype=float).reshape(-1)
@@ -554,6 +578,10 @@ def predict_future_5s(final_state, last_timestamp, imu_dt,
     if prev_q is not None and np.dot(quaternion, np.asarray(prev_q, float)) < 0:
         quaternion = -quaternion
 
+    # Clamp small residual drift velocity to zero if platform was nearly stopped
+    if np.linalg.norm(velocity) < 0.35:
+        velocity = np.zeros(3, dtype=float)
+
     n = int(np.floor(horizon / imu_dt + 1e-9))
     times_sec = imu_dt * np.arange(1, n + 1)
     if len(times_sec) == 0 or horizon - times_sec[-1] > 1e-9:
@@ -561,7 +589,13 @@ def predict_future_5s(final_state, last_timestamp, imu_dt,
     else:
         times_sec[-1] = horizon
 
-    positions = position + np.outer(times_sec, velocity)
+    # Integral of v0 * exp(-decay_rate * t) dt
+    if decay_rate > 1e-6:
+        eff_dt = (1.0 - np.exp(-decay_rate * times_sec)) / decay_rate
+    else:
+        eff_dt = times_sec
+
+    positions = position + np.outer(eff_dt, velocity)
     raw_future_ts = last_timestamp + (times_sec / ts_scale)
 
     traj = np.column_stack([
