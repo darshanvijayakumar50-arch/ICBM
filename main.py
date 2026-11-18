@@ -8,10 +8,6 @@ Input:
 
 Output:
     CSV file with 8 columns: time,tx,ty,tz,qx,qy,qz,qw
-    (where tx, ty, tz represent estimated 3D position x, y, z in meters, and qx..qw is orientation)
-
-Usage:
-    python estimate_trajectory.py <degraded_input.csv> <trajectory_output.csv> [--gyro-deg]
 """
 
 import argparse
@@ -178,10 +174,7 @@ def repair_and_preprocess(imu_stream, ts_unit="auto", accel_unit="auto", gyro_de
 # ==============================================================================
 
 def initialize_alignment(data, ts_sec):
-    """
-    Singularity-free gravity alignment + full gyro bias initialization.
-    Works for any IMU mounting orientation (e.g., EuRoC where X-axis points upward).
-    """
+    """Singularity-free gravity alignment + full gyro bias initialization."""
     init_mask = ts_sec <= 1.5
     if np.sum(init_mask) < 10:
         init_mask = np.arange(min(50, len(data)))
@@ -344,10 +337,7 @@ def eskf_zupt_update(state, acc_raw, gyro_raw, P):
 
 
 def eskf_gravity_tilt_update(state, acc_raw, P):
-    """
-    Lightweight gravity-vector roll/pitch correction during quasi-constant velocity.
-    Does NOT update accelerometer bias (H[:, 9:12] = 0).
-    """
+    """Lightweight gravity-vector roll/pitch correction during quasi-constant velocity."""
     g_world = np.array([0.0, 0.0, G], dtype=np.float64)
     R = quaternion_to_rotation_matrix(state["q"])
     g_body_pred = R.T @ g_world
@@ -366,11 +356,27 @@ def eskf_gravity_tilt_update(state, acc_raw, P):
     return eskf_inject_error(state, delta_x, P_upd)
 
 
+def eskf_velocity_damping_update(state, P, sigma_v=2.5):
+    """
+    Soft zero-mean velocity prior for bounded-workspace platforms.
+    Prevents long-term unobservable attitude drift from integrating gravity into runaway velocity.
+    """
+    r_vel = -state["vel"]
+    H = np.zeros((3, 15), dtype=np.float64)
+    H[0:3, 3:6] = np.eye(3)
+
+    R_meas = np.eye(3) * (sigma_v ** 2)
+    S = H @ P @ H.T + R_meas
+    K = P @ H.T @ np.linalg.inv(S)
+    delta_x = K @ r_vel
+
+    I_KH = np.eye(15) - K @ H
+    P_upd = I_KH @ P @ I_KH.T + K @ R_meas @ K.T
+    return eskf_inject_error(state, delta_x, P_upd)
+
+
 def is_stationary_shoe(acc_win, gyr_win, ba, bg, sigma_a=0.15, sigma_g=0.015, gamma=4.0):
-    """
-    Stance Hypothesis Optimal Estimation (SHOE) detector over a sliding window.
-    Distinguishes true ground rest from constant-velocity flight via signal variance.
-    """
+    """Stance Hypothesis Optimal Estimation (SHOE) detector over a sliding window."""
     if len(acc_win) < 10:
         return False
 
@@ -447,7 +453,10 @@ def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro
 
         # 2. Total Sensor Blackout / End-of-File Failure (exact zeros)
         if np.linalg.norm(acc_raw) < 1e-3 and np.linalg.norm(gyro_raw) < 1e-5:
-            state["vel"] *= np.exp(-1.5 * dt)
+            # Rapidly damp drifted velocity to zero (tau ~ 0.08 s) so EOF blackout doesn't overshoot
+            state["vel"] *= np.exp(-12.0 * dt)
+            if np.linalg.norm(state["vel"]) < 0.05:
+                state["vel"][:] = 0.0
             state["pos"] += state["vel"] * dt
             P[0:9, 0:9] *= 1.01
             trajectory_output[i, 0] = raw_ts[i]
@@ -494,7 +503,7 @@ def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro
         else:
             state, P = eskf_predict(state, acc_raw, gyro_raw, P, dt)
 
-        # 6. Measurement Updates (Gated ZUPT vs. In-Flight Tilt-Only Update)
+        # 6. Measurement Updates (Gated ZUPT vs. In-Flight Tilt & Velocity Damping)
         acc_unbiased_norm = np.linalg.norm(acc_raw - state["ba"])
         gyr_unbiased_norm = np.linalg.norm(gyro_raw - state["bg"])
         est_speed = np.linalg.norm(state["vel"])
@@ -504,8 +513,10 @@ def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro
                 np.array(acc_buf), np.array(gyr_buf), state["ba"], state["bg"]
             ):
                 state, P = eskf_zupt_update(state, acc_raw, gyro_raw, P)
-            elif abs(acc_unbiased_norm - G) < 0.12 and gyr_unbiased_norm < 0.08:
-                state, P = eskf_gravity_tilt_update(state, acc_raw, P)
+            else:
+                if abs(acc_unbiased_norm - G) < 0.12 and gyr_unbiased_norm < 0.08:
+                    state, P = eskf_gravity_tilt_update(state, acc_raw, P)
+                state, P = eskf_velocity_damping_update(state, P, sigma_v=2.5)
 
         # 7. Log Output
         trajectory_output[i, 0] = raw_ts[i]
@@ -517,10 +528,7 @@ def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro
 
 def predict_future_5s(final_state, last_timestamp, imu_dt,
                       horizon=5.0, prev_q=None, ts_scale=1.0):
-    """
-    Constant-velocity, constant-orientation prediction.
-    Scales time increments by 1.0 / ts_scale so output timestamps match input units (s, ms, us, ns).
-    """
+    """Constant-velocity, constant-orientation prediction."""
     position = np.asarray(final_state["pos"], dtype=float).reshape(-1)
     velocity = np.asarray(final_state["vel"], dtype=float).reshape(-1)
     quaternion = np.asarray(final_state["q"], dtype=float).reshape(-1)
@@ -575,6 +583,7 @@ def main():
     ap.add_argument("--ts-unit", choices=["auto", "s", "ms", "us", "ns"], default="auto")
     ap.add_argument("--accel-unit", choices=["auto", "ms2", "g"], default="auto")
     ap.add_argument("--gyro-deg", action="store_true", help="Set if input gyro is in deg/s")
+    ap.add_argument("--no-future", action="store_true", help="Disable appending 5s future prediction")
     args = ap.parse_args()
 
     header = detect_header(args.input)
@@ -582,7 +591,6 @@ def main():
     if df.shape[1] != 7:
         sys.exit(f"Expected 7 columns, got {df.shape[1]}")
 
-    # Preserve exact int64 timestamps so 19-digit EuRoC nanosecond epochs never lose precision
     ts_col = df.iloc[:, 0]
     is_int_ts = np.all(np.isclose(ts_col, np.round(ts_col), atol=1e-3))
     exact_raw_ts = np.round(ts_col.to_numpy(dtype=np.float64)).astype(np.int64) if is_int_ts else None
@@ -596,28 +604,34 @@ def main():
         exact_int_ts=exact_raw_ts,
     )
 
-    last_ts = int(exact_raw_ts[-1]) if exact_raw_ts is not None else float(traj[-1, 0])
-    future_traj = predict_future_5s(
-        final_state=final_state,
-        last_timestamp=last_ts,
-        imu_dt=imu_dt,
-        horizon=5.0,
-        prev_q=final_state["q"],
-        ts_scale=ts_scale,
-    )
-
-    complete_traj = np.vstack([traj, future_traj])
+    if args.no_future:
+        complete_traj = traj
+        all_int_ts = exact_raw_ts
+    else:
+        last_ts = int(exact_raw_ts[-1]) if exact_raw_ts is not None else float(traj[-1, 0])
+        future_traj = predict_future_5s(
+            final_state=final_state,
+            last_timestamp=last_ts,
+            imu_dt=imu_dt,
+            horizon=5.0,
+            prev_q=final_state["q"],
+            ts_scale=ts_scale,
+        )
+        complete_traj = np.vstack([traj, future_traj])
+        if exact_raw_ts is not None:
+            n_steps = len(future_traj)
+            times_sec = imu_dt * np.arange(1, n_steps + 1)
+            if times_sec[-1] > 5.0:
+                times_sec[-1] = 5.0
+            future_int_ts = exact_raw_ts[-1] + np.round(times_sec / ts_scale).astype(np.int64)
+            all_int_ts = np.concatenate([exact_raw_ts, future_int_ts])
+        else:
+            all_int_ts = None
 
     out_cols = ["time", "tx", "ty", "tz", "qx", "qy", "qz", "qw"]
     out_df = pd.DataFrame(complete_traj, columns=out_cols)
-
-    if exact_raw_ts is not None:
-        n_steps = len(future_traj)
-        times_sec = imu_dt * np.arange(1, n_steps + 1)
-        if times_sec[-1] > 5.0:
-            times_sec[-1] = 5.0
-        future_int_ts = exact_raw_ts[-1] + np.round(times_sec / ts_scale).astype(np.int64)
-        out_df["time"] = np.concatenate([exact_raw_ts, future_int_ts])
+    if all_int_ts is not None:
+        out_df["time"] = all_int_ts
 
     out_df.to_csv(args.output, index=False, float_format="%.6f")
     print(f"Saved trajectory ({len(out_df)} rows) -> {args.output}")
