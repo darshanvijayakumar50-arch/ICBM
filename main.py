@@ -517,6 +517,58 @@ def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro
     return trajectory_output
 
 
+def predict_future_5s(final_state, last_timestamp, imu_dt,
+                      horizon=5.0, prev_q=None):
+    """
+    Constant-velocity, constant-orientation prediction.
+    final_state: pos [x,y,z], vel [vx,vy,vz] (same frame as pos),
+                 q [qx,qy,qz,qw] (XYZW)
+    Returns rows: [t, tx, ty, tz, qx, qy, qz, qw]  (TUM format)
+    """
+    position = np.asarray(final_state["pos"], dtype=float).reshape(-1)
+    velocity = np.asarray(final_state["vel"], dtype=float).reshape(-1)
+    quaternion = np.asarray(final_state["q"], dtype=float).reshape(-1)
+
+    if position.shape != (3,) or velocity.shape != (3,):
+        raise ValueError("Position and velocity must have 3 elements")
+    if quaternion.shape != (4,):
+        raise ValueError("Quaternion must have 4 elements")
+    if not (np.all(np.isfinite(position)) and np.all(np.isfinite(velocity))
+            and np.all(np.isfinite(quaternion))):
+        raise ValueError("Non-finite value in final state")
+    if not (np.isfinite(imu_dt) and np.isfinite(horizon)
+            and np.isfinite(last_timestamp)):
+        raise ValueError("Non-finite time value")
+    if imu_dt <= 0 or horizon <= 0:
+        raise ValueError("Invalid time interval")
+
+    q_norm = np.linalg.norm(quaternion)
+    if q_norm < 1e-12:
+        raise ValueError("Invalid zero quaternion")
+    quaternion = quaternion / q_norm
+
+    # Keep sign continuous with the previous quaternion (q and -q are equal)
+    if prev_q is not None and np.dot(quaternion, np.asarray(prev_q, float)) < 0:
+        quaternion = -quaternion
+
+    # Robust time grid: integer count, then make sure the endpoint is exactly horizon
+    n = int(np.floor(horizon / imu_dt + 1e-9))
+    times = imu_dt * np.arange(1, n + 1)
+    if len(times) == 0 or horizon - times[-1] > 1e-9:
+        times = np.append(times, horizon)
+    else:
+        times[-1] = horizon
+
+    positions = position + np.outer(times, velocity)   # (N, 3)
+
+    traj = np.column_stack([
+        last_timestamp + times,
+        positions,
+        np.tile(quaternion, (len(times), 1))
+    ])
+    return traj.tolist()
+
+
 # ==============================================================================
 # 5. CLI ENTRYPOINT
 # ==============================================================================
@@ -542,6 +594,20 @@ def main():
         accel_unit=args.accel_unit,
         gyro_deg=args.gyro_deg,
     )
+
+    future_traj = predict_future_5s(
+        final_state=final_state,
+        last_timestamp=timestamps[-1],
+        imu_dt=imu_dt,
+        horizon=5.0,
+        prev_q=final_state["q"]
+    )
+
+    # 3. Combine original and future trajectories
+    future_traj = np.asarray(future_traj, dtype=np.float64)
+
+    complete_traj = np.vstack([traj, future_traj])
+
 
     out_cols = ["time", "tx", "ty", "tz", "qx", "qy", "qz", "qw"]
     out_df = pd.DataFrame(traj, columns=out_cols)
