@@ -335,12 +335,37 @@ def eskf_gravity_tilt_update(state, acc_raw, P):
 def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro_deg=False):
     raw_ts, ts_sec, data = repair_and_preprocess(imu_stream, ts_unit, accel_unit, gyro_deg)
     n = len(data)
+
+    # Detect sensor blackout / zero-filled samples
+    acc_norm = np.linalg.norm(data[:, 1:4], axis=1)
+    gyro_norm = np.linalg.norm(data[:, 4:7], axis=1)
+
+    zero_mask = (acc_norm < 0.1) & (gyro_norm < 1e-4)
+
+    # Find the beginning of the trailing zero region
+    valid_end = n
+
+    while valid_end > 0 and zero_mask[valid_end - 1]:
+        valid_end -= 1
+
+    if valid_end == 0:
+        raise ValueError("No valid IMU measurements found")
+
+    blackout_start = valid_end
+
+    print(f"Last valid IMU index: {valid_end - 1}")
+    print(f"Blackout starts at index: {blackout_start}")
+    print(f"Blackout duration: {ts_sec[-1] - ts_sec[blackout_start]:.3f}s")
+    
     diffs = np.diff(ts_sec)
     expected_dt = np.median(diffs[diffs > 0]) if np.any(diffs > 0) else 0.005
 
     trajectory_output = np.zeros((n, 8), dtype=np.float64)
 
-    q0, bg0 = initialize_alignment(data, ts_sec)
+    q0, bg0 = initialize_alignment(
+        data[:valid_end],
+        ts_sec[:valid_end]
+    )   
     state = {
         "pos": np.zeros(3, dtype=np.float64),
         "vel": np.zeros(3, dtype=np.float64),
@@ -361,7 +386,7 @@ def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro
     last_valid_acc = data[0, 1:4].copy()
     last_valid_gyr = data[0, 4:7].copy()
 
-    for i in range(1, n):
+    for i in range(1, valid_end):
         dt = ts_sec[i] - ts_sec[i - 1]
 
         # 1. Duplicated rows (dt == 0)
@@ -373,16 +398,6 @@ def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro
 
         acc_raw = data[i, 1:4].copy()
         gyro_raw = data[i, 4:7].copy()
-
-        # 2. Total Sensor Blackout / End-of-File Failure (all zeros)
-        if np.linalg.norm(acc_raw) < 0.1 and np.linalg.norm(gyro_raw) < 1e-4:
-            state["vel"] *= np.exp(-2.0 * dt)  # Smooth velocity decay during blackout
-            state["pos"] += state["vel"] * dt
-            P *= 1.05
-            trajectory_output[i, 0] = raw_ts[i]
-            trajectory_output[i, 1:4] = state["pos"]
-            trajectory_output[i, 4:8] = state["q"]
-            continue
 
         # 3. Stuck / Frozen Sample Detection (2-10 identical consecutive frames)
         is_frozen = np.allclose(data[i, 1:7], data[i - 1, 1:7], atol=1e-9)
@@ -424,6 +439,27 @@ def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro
         trajectory_output[i, 0] = raw_ts[i]
         trajectory_output[i, 1:4] = state["pos"]
         trajectory_output[i, 4:8] = state["q"]
+
+    # 8. Dead-reckon the trailing zero-filled region
+    if blackout_start < n:
+
+        # Capture the final valid estimated state
+        last_pos = state["pos"].copy()
+        last_vel = state["vel"].copy()
+        last_q = state["q"].copy()
+
+        last_valid_time = ts_sec[valid_end - 1]
+
+        for i in range(blackout_start, n):
+
+            dt = ts_sec[i] - last_valid_time
+
+            # Constant-velocity dead reckoning
+            predicted_pos = last_pos + last_vel * dt
+
+            trajectory_output[i, 0] = ts_sec[i]
+            trajectory_output[i, 1:4] = predicted_pos
+            trajectory_output[i, 4:8] = last_q
 
     return trajectory_output
 
@@ -505,20 +541,6 @@ def main():
         accel_unit=args.accel_unit,
         gyro_deg=args.gyro_deg,
     )
-
-    future_traj = predict_future_5s(
-        final_state=final_state,
-        last_timestamp=timestamps[-1],
-        imu_dt=imu_dt,
-        horizon=5.0,
-        prev_q=final_state["q"]
-    )
-
-    # 3. Combine original and future trajectories
-    future_traj = np.asarray(future_traj, dtype=np.float64)
-
-    complete_traj = np.vstack([traj, future_traj])
-
 
     out_cols = ["time", "tx", "ty", "tz", "qx", "qy", "qz", "qw"]
     out_df = pd.DataFrame(traj, columns=out_cols)
