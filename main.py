@@ -368,7 +368,7 @@ def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro
         if dt <= 1e-7:
             trajectory_output[i, 0] = raw_ts[i]
             trajectory_output[i, 1:4] = state["pos"]
-            trajectory_output[i, 4:8] = state["q"]
+            trajectory_output[i, 4:8] = state[ "q"]
             continue
 
         acc_raw = data[i, 1:4].copy()
