@@ -73,7 +73,7 @@ def skew_symmetric(v):
 
 
 # ==============================================================================
-# 2. INPUT DETECTION & PRE-CLEANING (MATCHING degrade_imu.py)
+# 2. INPUT DETECTION & PRE-CLEANING
 # ==============================================================================
 
 def detect_header(path):
@@ -115,7 +115,7 @@ def detect_accel_scale(acc, override="auto"):
     return 1.0
 
 
-def repair_and_preprocess(imu_stream, ts_unit="auto", accel_unit="auto", gyro_deg=False):
+def repair_and_preprocess(imu_stream, ts_unit="auto", accel_unit="auto", gyro_deg=False, exact_int_ts=None):
     if imu_stream.ndim != 2 or imu_stream.shape[1] != 7:
         raise ValueError("Expected Nx7 array: [timestamp, ax, ay, az, gx, gy, gz]")
     if len(imu_stream) < 2:
@@ -141,22 +141,24 @@ def repair_and_preprocess(imu_stream, ts_unit="auto", accel_unit="auto", gyro_de
         data[:, [1, 2, 3, 4, 5, 6]] = data[:, [4, 5, 6, 1, 2, 3]]
 
     raw_ts = data[:, 0].copy()
-    ts_scale = detect_ts_scale(raw_ts, ts_unit)
+    if exact_int_ts is not None:
+        ts_scale = detect_ts_scale(exact_int_ts, ts_unit)
+        ts_sec = (exact_int_ts - exact_int_ts[0]).astype(np.float64) * ts_scale
+    else:
+        ts_scale = detect_ts_scale(raw_ts, ts_unit)
+        ts_sec = (raw_ts - raw_ts[0]) * ts_scale
+
     acc_scale = detect_accel_scale(data[:, 1:4], accel_unit)
     gyr_scale = np.radians(1.0) if gyro_deg else 1.0
 
-    ts_sec = (raw_ts - raw_ts[0]) * ts_scale
     data[:, 1:4] *= acc_scale
     data[:, 4:7] *= gyr_scale
 
     # 3-sample rolling median filter to crush single-sample spikes before ESKF
-    # Only applied to non-zero regions so we don't smear true start/end values
     clean_sensors = data[:, 1:7].copy()
     for i in range(1, len(data) - 1):
-        # Skip if part of total zero-out failure
         if np.linalg.norm(data[i, 1:7]) < 1e-4:
             continue
-        # Only median-filter if there's a sharp jump (preserves smooth true dynamics)
         jump_prev = np.linalg.norm(data[i, 1:4] - data[i - 1, 1:4])
         jump_next = np.linalg.norm(data[i, 1:4] - data[i + 1, 1:4])
         if jump_prev > 2.5 and jump_next > 2.5:
@@ -168,7 +170,7 @@ def repair_and_preprocess(imu_stream, ts_unit="auto", accel_unit="auto", gyro_de
             clean_sensors[i, 3:6] = np.median(data[i - 1:i + 2, 4:7], axis=0)
 
     data[:, 1:7] = clean_sensors
-    return raw_ts, ts_sec, data
+    return raw_ts, ts_sec, data, ts_scale
 
 
 # ==============================================================================
@@ -192,7 +194,6 @@ def initialize_alignment(data, ts_sec):
     if a_norm < 1e-6:
         q0 = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
     else:
-        # Shortest-arc rotation aligning measured specific force u_b to world Z-up [0, 0, 1]
         u_b = mean_acc / a_norm
         u_w = np.array([0.0, 0.0, 1.0], dtype=np.float64)
 
@@ -208,7 +209,6 @@ def initialize_alignment(data, ts_sec):
             q0 = np.append(axis * np.sin(0.5 * angle), np.cos(0.5 * angle))
             q0 /= np.linalg.norm(q0)
 
-    # Allow initial gyro biases up to 0.25 rad/s (EuRoC Z-gyro bias is ~0.082 rad/s)
     med_gyr = np.median(gyr_init, axis=0)
     bg0 = med_gyr if np.linalg.norm(med_gyr) < 0.25 else np.zeros(3, dtype=np.float64)
     return q0, bg0
@@ -286,7 +286,6 @@ def eskf_inject_error(state, delta_x, P):
     q_c = quaternion_multiply(state["q"], dq)
     q_c /= np.linalg.norm(q_c)
 
-    # Clamp biases to physically realistic MEMS bounds so transients can never cause runaway
     ba_new = np.clip(state["ba"] + dba, -1.5, 1.5)
     bg_new = np.clip(state["bg"] + dbg, -0.25, 0.25)
 
@@ -331,7 +330,6 @@ def eskf_zupt_update(state, acc_raw, gyro_raw, P):
     S = H @ P @ H.T + R_meas
     S_inv = np.linalg.inv(S)
 
-    # Chi-Square (NIS) gate on velocity innovation (3 DOF, 99% threshold = 11.34)
     S_vel = S[0:3, 0:3]
     nis_vel = float(r_vel.T @ np.linalg.inv(S_vel) @ r_vel)
     if nis_vel > 11.34:
@@ -348,8 +346,7 @@ def eskf_zupt_update(state, acc_raw, gyro_raw, P):
 def eskf_gravity_tilt_update(state, acc_raw, P):
     """
     Lightweight gravity-vector roll/pitch correction during quasi-constant velocity.
-    Does NOT update accelerometer bias (H[:, 9:12] = 0) so sustained flight accelerations
-    cannot corrupt state['ba'] and cause quadratic position runaway.
+    Does NOT update accelerometer bias (H[:, 9:12] = 0).
     """
     g_world = np.array([0.0, 0.0, G], dtype=np.float64)
     R = quaternion_to_rotation_matrix(state["q"])
@@ -397,11 +394,13 @@ def is_stationary_shoe(acc_win, gyr_win, ba, bg, sigma_a=0.15, sigma_g=0.015, ga
 # 4. MASTER TRAJECTORY PIPELINE
 # ==============================================================================
 
-def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro_deg=False):
-    raw_ts, ts_sec, data = repair_and_preprocess(imu_stream, ts_unit, accel_unit, gyro_deg)
+def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro_deg=False, exact_int_ts=None):
+    raw_ts, ts_sec, data, ts_scale = repair_and_preprocess(
+        imu_stream, ts_unit, accel_unit, gyro_deg, exact_int_ts=exact_int_ts
+    )
     n = len(data)
     diffs = np.diff(ts_sec)
-    expected_dt = np.median(diffs[diffs > 0]) if np.any(diffs > 0) else 0.005
+    expected_dt = float(np.median(diffs[diffs > 0])) if np.any(diffs > 0) else 0.005
 
     trajectory_output = np.zeros((n, 8), dtype=np.float64)
 
@@ -448,8 +447,9 @@ def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro
 
         # 2. Total Sensor Blackout / End-of-File Failure (exact zeros)
         if np.linalg.norm(acc_raw) < 1e-3 and np.linalg.norm(gyro_raw) < 1e-5:
+            state["vel"] *= np.exp(-1.5 * dt)
             state["pos"] += state["vel"] * dt
-            P[0:9, 0:9] *= 1.02
+            P[0:9, 0:9] *= 1.01
             trajectory_output[i, 0] = raw_ts[i]
             trajectory_output[i, 1:4] = state["pos"]
             trajectory_output[i, 4:8] = state["q"]
@@ -500,13 +500,11 @@ def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro
         est_speed = np.linalg.norm(state["vel"])
 
         if not is_frozen:
-            # ZUPT fires only when SHOE variance confirms rest AND estimated speed is < 1.5 m/s
             if est_speed < 1.5 and is_stationary_shoe(
                 np.array(acc_buf), np.array(gyr_buf), state["ba"], state["bg"]
             ):
                 state, P = eskf_zupt_update(state, acc_raw, gyro_raw, P)
             elif abs(acc_unbiased_norm - G) < 0.12 and gyr_unbiased_norm < 0.08:
-                # Safe in-flight roll/pitch stabilization (does not touch velocity or accel bias)
                 state, P = eskf_gravity_tilt_update(state, acc_raw, P)
 
         # 7. Log Output
@@ -514,16 +512,14 @@ def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro
         trajectory_output[i, 1:4] = state["pos"]
         trajectory_output[i, 4:8] = state["q"]
 
-    return trajectory_output
+    return trajectory_output, state, expected_dt, ts_scale
 
 
 def predict_future_5s(final_state, last_timestamp, imu_dt,
-                      horizon=5.0, prev_q=None):
+                      horizon=5.0, prev_q=None, ts_scale=1.0):
     """
     Constant-velocity, constant-orientation prediction.
-    final_state: pos [x,y,z], vel [vx,vy,vz] (same frame as pos),
-                 q [qx,qy,qz,qw] (XYZW)
-    Returns rows: [t, tx, ty, tz, qx, qy, qz, qw]  (TUM format)
+    Scales time increments by 1.0 / ts_scale so output timestamps match input units (s, ms, us, ns).
     """
     position = np.asarray(final_state["pos"], dtype=float).reshape(-1)
     velocity = np.asarray(final_state["vel"], dtype=float).reshape(-1)
@@ -547,26 +543,25 @@ def predict_future_5s(final_state, last_timestamp, imu_dt,
         raise ValueError("Invalid zero quaternion")
     quaternion = quaternion / q_norm
 
-    # Keep sign continuous with the previous quaternion (q and -q are equal)
     if prev_q is not None and np.dot(quaternion, np.asarray(prev_q, float)) < 0:
         quaternion = -quaternion
 
-    # Robust time grid: integer count, then make sure the endpoint is exactly horizon
     n = int(np.floor(horizon / imu_dt + 1e-9))
-    times = imu_dt * np.arange(1, n + 1)
-    if len(times) == 0 or horizon - times[-1] > 1e-9:
-        times = np.append(times, horizon)
+    times_sec = imu_dt * np.arange(1, n + 1)
+    if len(times_sec) == 0 or horizon - times_sec[-1] > 1e-9:
+        times_sec = np.append(times_sec, horizon)
     else:
-        times[-1] = horizon
+        times_sec[-1] = horizon
 
-    positions = position + np.outer(times, velocity)   # (N, 3)
+    positions = position + np.outer(times_sec, velocity)
+    raw_future_ts = last_timestamp + (times_sec / ts_scale)
 
     traj = np.column_stack([
-        last_timestamp + times,
+        raw_future_ts,
         positions,
-        np.tile(quaternion, (len(times), 1))
+        np.tile(quaternion, (len(times_sec), 1))
     ])
-    return traj.tolist()
+    return traj
 
 
 # ==============================================================================
@@ -587,31 +582,43 @@ def main():
     if df.shape[1] != 7:
         sys.exit(f"Expected 7 columns, got {df.shape[1]}")
 
+    # Preserve exact int64 timestamps so 19-digit EuRoC nanosecond epochs never lose precision
+    ts_col = df.iloc[:, 0]
+    is_int_ts = np.all(np.isclose(ts_col, np.round(ts_col), atol=1e-3))
+    exact_raw_ts = np.round(ts_col.to_numpy(dtype=np.float64)).astype(np.int64) if is_int_ts else None
+
     imu_array = df.to_numpy(dtype=np.float64)
-    traj = run_trajectory_estimator(
+    traj, final_state, imu_dt, ts_scale = run_trajectory_estimator(
         imu_array,
         ts_unit=args.ts_unit,
         accel_unit=args.accel_unit,
         gyro_deg=args.gyro_deg,
+        exact_int_ts=exact_raw_ts,
     )
 
+    last_ts = int(exact_raw_ts[-1]) if exact_raw_ts is not None else float(traj[-1, 0])
     future_traj = predict_future_5s(
         final_state=final_state,
-        last_timestamp=timestamps[-1],
+        last_timestamp=last_ts,
         imu_dt=imu_dt,
         horizon=5.0,
-        prev_q=final_state["q"]
+        prev_q=final_state["q"],
+        ts_scale=ts_scale,
     )
-
-    # 3. Combine original and future trajectories
-    future_traj = np.asarray(future_traj, dtype=np.float64)
 
     complete_traj = np.vstack([traj, future_traj])
 
-
     out_cols = ["time", "tx", "ty", "tz", "qx", "qy", "qz", "qw"]
-    out_df = pd.DataFrame(traj, columns=out_cols)
-    out_df["time"] = np.round(traj[:, 0]).astype(np.int64)
+    out_df = pd.DataFrame(complete_traj, columns=out_cols)
+
+    if exact_raw_ts is not None:
+        n_steps = len(future_traj)
+        times_sec = imu_dt * np.arange(1, n_steps + 1)
+        if times_sec[-1] > 5.0:
+            times_sec[-1] = 5.0
+        future_int_ts = exact_raw_ts[-1] + np.round(times_sec / ts_scale).astype(np.int64)
+        out_df["time"] = np.concatenate([exact_raw_ts, future_int_ts])
+
     out_df.to_csv(args.output, index=False, float_format="%.6f")
     print(f"Saved trajectory ({len(out_df)} rows) -> {args.output}")
 
