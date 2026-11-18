@@ -57,7 +57,7 @@ def process_file(input_path: Path, output_path: Path) -> None:
     start = time.perf_counter()
 
     result = subprocess.run(
-        ["python", "main.py", "data/easy/imu.csv", "data/easy/estimated.csv"],
+        [".venv/bin/python.exe", "main.py", "data/easy/imu.csv", "data/easy/estimated.csv"],
         capture_output=True,
         text=True,
         stdout=None,
