@@ -2,6 +2,8 @@ import argparse
 import logging
 import sys
 from pathlib import Path
+import subprocess
+import time
 
 
 logger = logging.getLogger(__name__)
@@ -51,6 +53,21 @@ def parse_args() -> argparse.Namespace:
 
 def process_file(input_path: Path, output_path: Path) -> None:
     """TODO: Load file and mesure perf"""
+
+    start = time.perf_counter()
+
+    result = subprocess.run(
+        ["python", "main.py", "data/easy/imu.csv", "data/easy/estimated.csv"],
+        capture_output=True,
+        text=True,
+        stdout=None,
+        stderr=None,
+    )
+
+    elapsed = time.perf_counter() - start
+
+    logger.info(f"Elapsed time: {elapsed:.6f} seconds")
+    logger.info(f"Exit code: {result.returncode}")
 
 def main() -> int:
     args = parse_args()
