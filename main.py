@@ -4,11 +4,11 @@ estimate_trajectory.py - Robust ESKF IMU Trajectory Estimator for degraded IMU r
 
 Input:
     CSV file with 7 columns: timestamp, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z
-    (Header optional; units auto-detected or forced via CLI flags)
+    (or EuRoC order: timestamp, w_x, w_y, w_z, a_x, a_y, a_z — auto-detected)
 
 Output:
-    CSV file with 8 columns: time,ax,ay,az,qx,qy,qz,qw
-    (where ax, ay, az represent estimated 3D position x, y, z in meters, and qx..qw is orientation)
+    CSV file with 8 columns: time,tx,ty,tz,qx,qy,qz,qw
+    (where tx, ty, tz represent estimated 3D position x, y, z in meters, and qx..qw is orientation)
 
 Usage:
     python estimate_trajectory.py <degraded_input.csv> <trajectory_output.csv> [--gyro-deg]
@@ -132,6 +132,14 @@ def repair_and_preprocess(imu_stream, ts_unit="auto", accel_unit="auto", gyro_de
                 raise ValueError(f"Column {col} contains only NaNs")
             data[nan_mask, col] = np.interp(np.where(nan_mask)[0], valid, data[valid, col])
 
+    # Auto-swap columns if input is in EuRoC order: [ts, gx, gy, gz, ax, ay, az]
+    n14 = np.linalg.norm(data[:, 1:4], axis=1)
+    n47 = np.linalg.norm(data[:, 4:7], axis=1)
+    med_14 = np.median(n14[n14 > 1e-6]) if np.any(n14 > 1e-6) else 0.0
+    med_47 = np.median(n47[n47 > 1e-6]) if np.any(n47 > 1e-6) else 0.0
+    if med_14 < 0.5 and (0.5 < med_47 < 20.0):
+        data[:, [1, 2, 3, 4, 5, 6]] = data[:, [4, 5, 6, 1, 2, 3]]
+
     raw_ts = data[:, 0].copy()
     ts_scale = detect_ts_scale(raw_ts, ts_unit)
     acc_scale = detect_accel_scale(data[:, 1:4], accel_unit)
@@ -168,7 +176,10 @@ def repair_and_preprocess(imu_stream, ts_unit="auto", accel_unit="auto", gyro_de
 # ==============================================================================
 
 def initialize_alignment(data, ts_sec):
-    """Uses the clean initial protect_seconds window to align roll, pitch, and initial gyro bias."""
+    """
+    Singularity-free gravity alignment + full gyro bias initialization.
+    Works for any IMU mounting orientation (e.g., EuRoC where X-axis points upward).
+    """
     init_mask = ts_sec <= 1.5
     if np.sum(init_mask) < 10:
         init_mask = np.arange(min(50, len(data)))
@@ -177,15 +188,29 @@ def initialize_alignment(data, ts_sec):
     gyr_init = data[init_mask, 4:7]
 
     mean_acc = np.median(acc_init, axis=0)
-    ax, ay, az = mean_acc
+    a_norm = np.linalg.norm(mean_acc)
+    if a_norm < 1e-6:
+        q0 = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
+    else:
+        # Shortest-arc rotation aligning measured specific force u_b to world Z-up [0, 0, 1]
+        u_b = mean_acc / a_norm
+        u_w = np.array([0.0, 0.0, 1.0], dtype=np.float64)
 
-    roll = np.arctan2(ay, az)
-    pitch = np.arctan2(-ax, np.sqrt(ay**2 + az**2))
-    yaw = 0.0
-    q0 = euler_to_quaternion(roll, pitch, yaw)
+        dot = np.clip(np.dot(u_b, u_w), -1.0, 1.0)
+        if dot > 0.999999:
+            q0 = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
+        elif dot < -0.999999:
+            q0 = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+        else:
+            axis = np.cross(u_b, u_w)
+            axis /= np.linalg.norm(axis)
+            angle = np.arccos(dot)
+            q0 = np.append(axis * np.sin(0.5 * angle), np.cos(0.5 * angle))
+            q0 /= np.linalg.norm(q0)
 
+    # Allow initial gyro biases up to 0.25 rad/s (EuRoC Z-gyro bias is ~0.082 rad/s)
     med_gyr = np.median(gyr_init, axis=0)
-    bg0 = med_gyr if np.linalg.norm(med_gyr) < 0.05 else np.zeros(3, dtype=np.float64)
+    bg0 = med_gyr if np.linalg.norm(med_gyr) < 0.25 else np.zeros(3, dtype=np.float64)
     return q0, bg0
 
 
@@ -234,7 +259,7 @@ def eskf_predict(state, acc_raw, gyro_raw, P, dt):
     Fi[12:15, 9:12] = np.eye(3)
 
     sigma_a, sigma_g = 0.22, 0.018
-    sigma_ba, sigma_bg = 0.012, 0.0008
+    sigma_ba, sigma_bg = 0.005, 0.0005
     Q_diag = np.array([
         sigma_a**2, sigma_a**2, sigma_a**2,
         sigma_g**2, sigma_g**2, sigma_g**2,
@@ -261,22 +286,27 @@ def eskf_inject_error(state, delta_x, P):
     q_c = quaternion_multiply(state["q"], dq)
     q_c /= np.linalg.norm(q_c)
 
+    # Clamp biases to physically realistic MEMS bounds so transients can never cause runaway
+    ba_new = np.clip(state["ba"] + dba, -1.5, 1.5)
+    bg_new = np.clip(state["bg"] + dbg, -0.25, 0.25)
+
     corrected_state = {
         "pos": state["pos"] + dp,
         "vel": state["vel"] + dv,
         "q": q_c,
-        "ba": state["ba"] + dba,
-        "bg": state["bg"] + dbg,
+        "ba": ba_new,
+        "bg": bg_new,
     }
 
     G_mat = np.eye(15, dtype=np.float64)
     G_mat[6:9, 6:9] = np.eye(3) - 0.5 * skew_symmetric(dtheta)
     P_reset = G_mat @ P @ G_mat.T
+    P_reset = 0.5 * (P_reset + P_reset.T)
     return corrected_state, P_reset
 
 
 def eskf_zupt_update(state, acc_raw, gyro_raw, P):
-    """9-DOF Zero-Velocity + Gravity + Zero-Angular-Rate Update."""
+    """9-DOF Zero-Velocity + Gravity + Zero-Angular-Rate Update with Chi-Square Gating."""
     g_world = np.array([0.0, 0.0, G], dtype=np.float64)
     R = quaternion_to_rotation_matrix(state["q"])
     g_body_pred = R.T @ g_world
@@ -293,13 +323,21 @@ def eskf_zupt_update(state, acc_raw, gyro_raw, P):
     H[6:9, 12:15] = np.eye(3)
 
     R_meas = np.diag([
+        0.05**2, 0.05**2, 0.05**2,
+        0.25**2, 0.25**2, 0.25**2,
         0.02**2, 0.02**2, 0.02**2,
-        0.18**2, 0.18**2, 0.18**2,
-        0.015**2, 0.015**2, 0.015**2,
     ])
 
     S = H @ P @ H.T + R_meas
-    K = P @ H.T @ np.linalg.inv(S)
+    S_inv = np.linalg.inv(S)
+
+    # Chi-Square (NIS) gate on velocity innovation (3 DOF, 99% threshold = 11.34)
+    S_vel = S[0:3, 0:3]
+    nis_vel = float(r_vel.T @ np.linalg.inv(S_vel) @ r_vel)
+    if nis_vel > 11.34:
+        return state, P
+
+    K = P @ H.T @ S_inv
     delta_x = K @ r
 
     I_KH = np.eye(15) - K @ H
@@ -308,7 +346,11 @@ def eskf_zupt_update(state, acc_raw, gyro_raw, P):
 
 
 def eskf_gravity_tilt_update(state, acc_raw, P):
-    """Lightweight gravity-vector roll/pitch correction during quasi-constant velocity."""
+    """
+    Lightweight gravity-vector roll/pitch correction during quasi-constant velocity.
+    Does NOT update accelerometer bias (H[:, 9:12] = 0) so sustained flight accelerations
+    cannot corrupt state['ba'] and cause quadratic position runaway.
+    """
     g_world = np.array([0.0, 0.0, G], dtype=np.float64)
     R = quaternion_to_rotation_matrix(state["q"])
     g_body_pred = R.T @ g_world
@@ -316,9 +358,8 @@ def eskf_gravity_tilt_update(state, acc_raw, P):
     r_acc = (acc_raw - state["ba"]) - g_body_pred
     H = np.zeros((3, 15), dtype=np.float64)
     H[0:3, 6:9] = skew_symmetric(g_body_pred)
-    H[0:3, 9:12] = np.eye(3)
 
-    R_meas = np.eye(3) * (0.35 ** 2)
+    R_meas = np.eye(3) * (0.85 ** 2)
     S = H @ P @ H.T + R_meas
     K = P @ H.T @ np.linalg.inv(S)
     delta_x = K @ r_acc
@@ -326,6 +367,30 @@ def eskf_gravity_tilt_update(state, acc_raw, P):
     I_KH = np.eye(15) - K @ H
     P_upd = I_KH @ P @ I_KH.T + K @ R_meas @ K.T
     return eskf_inject_error(state, delta_x, P_upd)
+
+
+def is_stationary_shoe(acc_win, gyr_win, ba, bg, sigma_a=0.15, sigma_g=0.015, gamma=4.0):
+    """
+    Stance Hypothesis Optimal Estimation (SHOE) detector over a sliding window.
+    Distinguishes true ground rest from constant-velocity flight via signal variance.
+    """
+    if len(acc_win) < 10:
+        return False
+
+    a_unb = acc_win - ba
+    g_unb = gyr_win - bg
+
+    a_mean = np.mean(a_unb, axis=0)
+    a_mean_norm = np.linalg.norm(a_mean)
+    if a_mean_norm < 1e-6 or abs(a_mean_norm - G) > 0.25:
+        return False
+
+    g_ref = G * (a_mean / a_mean_norm)
+    acc_term = np.sum((a_unb - g_ref) ** 2, axis=1) / (sigma_a ** 2)
+    gyr_term = np.sum(g_unb ** 2, axis=1) / (sigma_g ** 2)
+
+    T_shoe = np.mean(acc_term + gyr_term)
+    return T_shoe < gamma
 
 
 # ==============================================================================
@@ -375,9 +440,11 @@ def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro
     }
 
     P = np.eye(15, dtype=np.float64) * 0.01
-    P[0:3, 0:3] *= 0.001
-    P[3:6, 3:6] *= 0.01
-    P[6:9, 6:9] *= 0.001
+    P[0:3, 0:3] = np.eye(3) * (0.01 ** 2)
+    P[3:6, 3:6] = np.eye(3) * (0.05 ** 2)
+    P[6:9, 6:9] = np.eye(3) * (0.05 ** 2)
+    P[9:12, 9:12] = np.eye(3) * (0.15 ** 2)
+    P[12:15, 12:15] = np.eye(3) * (0.05 ** 2)
 
     trajectory_output[0, 0] = raw_ts[0]
     trajectory_output[0, 1:4] = state["pos"]
@@ -385,6 +452,11 @@ def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro
 
     last_valid_acc = data[0, 1:4].copy()
     last_valid_gyr = data[0, 4:7].copy()
+    consecutive_rejections = 0
+
+    shoe_win = max(15, min(40, int(round(0.25 / expected_dt))))
+    acc_buf = [data[0, 1:4].copy()]
+    gyr_buf = [data[0, 4:7].copy()]
 
     for i in range(1, valid_end):
         dt = ts_sec[i] - ts_sec[i - 1]
@@ -393,7 +465,7 @@ def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro
         if dt <= 1e-7:
             trajectory_output[i, 0] = raw_ts[i]
             trajectory_output[i, 1:4] = state["pos"]
-            trajectory_output[i, 4:8] = state[ "q"]
+            trajectory_output[i, 4:8] = state["q"]
             continue
 
         acc_raw = data[i, 1:4].copy()
@@ -405,19 +477,32 @@ def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro
             acc_raw = last_valid_acc
             gyro_raw = last_valid_gyr
 
-        # 4. Residual Spike Rejection
+        # 4. Residual Spike Rejection (with anti-latch counter)
         acc_jump = np.linalg.norm(acc_raw - last_valid_acc)
         gyr_jump = np.linalg.norm(gyro_raw - last_valid_gyr)
-        if (acc_jump > 3.5 and dt < 0.05) or (gyr_jump > 0.45 and dt < 0.05) or np.linalg.norm(acc_raw) > 50.0:
+        is_spike = (
+            (acc_jump > 4.5 and dt < 0.05)
+            or (gyr_jump > 0.6 and dt < 0.05)
+            or np.linalg.norm(acc_raw) > 60.0
+        )
+        if is_spike and consecutive_rejections < 4:
             acc_raw = last_valid_acc
             gyro_raw = last_valid_gyr
+            consecutive_rejections += 1
         else:
             last_valid_acc = acc_raw.copy()
             last_valid_gyr = gyro_raw.copy()
+            consecutive_rejections = 0
+
+        acc_buf.append(acc_raw.copy())
+        gyr_buf.append(gyro_raw.copy())
+        if len(acc_buf) > shoe_win:
+            acc_buf.pop(0)
+            gyr_buf.pop(0)
 
         # 5. State & Covariance Prediction (with sub-stepping across burst dropouts)
         if dt > 4.0 * expected_dt:
-            P *= min(10.0, dt / expected_dt)
+            P[0:9, 0:9] *= min(5.0, dt / expected_dt)
             steps = min(25, max(1, int(np.round(dt / expected_dt))))
             sub_dt = dt / steps
             for _ in range(steps):
@@ -425,14 +510,19 @@ def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro
         else:
             state, P = eskf_predict(state, acc_raw, gyro_raw, P, dt)
 
-        # 6. Measurement Updates (ZUPT when stationary; gentle tilt update when moving smoothly)
+        # 6. Measurement Updates (Gated ZUPT vs. In-Flight Tilt-Only Update)
         acc_unbiased_norm = np.linalg.norm(acc_raw - state["ba"])
         gyr_unbiased_norm = np.linalg.norm(gyro_raw - state["bg"])
+        est_speed = np.linalg.norm(state["vel"])
 
         if not is_frozen:
-            if abs(acc_unbiased_norm - G) < 0.25 and gyr_unbiased_norm < 0.03:
+            # ZUPT fires only when SHOE variance confirms rest AND estimated speed is < 1.5 m/s
+            if est_speed < 1.5 and is_stationary_shoe(
+                np.array(acc_buf), np.array(gyr_buf), state["ba"], state["bg"]
+            ):
                 state, P = eskf_zupt_update(state, acc_raw, gyro_raw, P)
-            elif abs(acc_unbiased_norm - G) < 0.15 and gyr_unbiased_norm < 0.15:
+            elif abs(acc_unbiased_norm - G) < 0.12 and gyr_unbiased_norm < 0.08:
+                # Safe in-flight roll/pitch stabilization (does not touch velocity or accel bias)
                 state, P = eskf_gravity_tilt_update(state, acc_raw, P)
 
         # 7. Log Output
@@ -544,6 +634,7 @@ def main():
 
     out_cols = ["time", "tx", "ty", "tz", "qx", "qy", "qz", "qw"]
     out_df = pd.DataFrame(traj, columns=out_cols)
+    out_df["time"] = np.round(traj[:, 0]).astype(np.int64)
     out_df.to_csv(args.output, index=False, float_format="%.6f")
     print(f"Saved trajectory ({len(out_df)} rows) -> {args.output}")
 
