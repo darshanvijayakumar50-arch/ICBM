@@ -1,10 +1,15 @@
 import argparse
 import logging
+import subprocess
+import threading
+import time
+from pathlib import Path
+
+import psutil
 import sys
 from pathlib import Path
-import subprocess
-import time
 
+import matplotlib.pyplot as plt
 
 logger = logging.getLogger(__name__)
 
@@ -48,26 +53,99 @@ def parse_args() -> argparse.Namespace:
         help="Show only warnings and errors",
     )
 
+    parser.add_argument(
+        "--no-graph",
+        action="store_true",
+        help="Show only logs, without graph",
+    )
+
+    parser.add_argument(
+        "--interval",
+        type=int,
+        help="Interval between RAM polls",
+        default=100,
+    )
+
     return parser.parse_args()
 
-
-def process_file(input_path: Path, output_path: Path) -> None:
-    """TODO: Load file and mesure perf"""
-
-    start = time.perf_counter()
-
-    result = subprocess.run(
-        [".venv/bin/python.exe", "main.py", "data/easy/imu.csv", "data/easy/estimated.csv"],
-        capture_output=True,
-        text=True,
+def benchmark(input_path: Path, output_path: Path, interval_ms:int = 100):
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "test.py",
+            input_path,
+            output_path,
+        ],
         stdout=None,
         stderr=None,
     )
 
+    def monitor_process_exit():
+        process.wait()
+        stop_event.set()
+
+    threading.Thread(
+        target=monitor_process_exit,
+        daemon=True
+    ).start()
+
+    monitored = psutil.Process(process.pid)
+
+    start = time.perf_counter()
+    performance = []  # (elapsed_time, ram_mb)
+
+    stop_event = threading.Event()
+    start_time = time.perf_counter()
+
+    peak_ram = 0
+
+    while process.poll() is None:
+        try:
+            processes = [monitored] + monitored.children(recursive=True)
+
+            ram = sum(
+                p.memory_info().rss
+                for p in processes
+                if p.is_running()
+            ) / (1024 ** 2)
+
+            peak_ram = max(peak_ram, ram)
+
+            performance.append((
+                time.perf_counter() - start_time,
+                ram
+            ))
+
+        except psutil.NoSuchProcess:
+            pass
+
+        # Wait for the interval, but stop immediately if signalled.
+        if stop_event.wait(interval_ms / 1000):
+            break
+
     elapsed = time.perf_counter() - start
 
-    logger.info(f"Elapsed time: {elapsed:.6f} seconds")
-    logger.info(f"Exit code: {result.returncode}")
+    return {
+        "exit_code": process.returncode,
+        "elapsed_seconds": elapsed,
+        "performance": performance,
+        "peak_ram_mb": peak_ram,
+    }
+
+def plot(performance):
+
+    times, ram_values = zip(*performance)
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(times, ram_values, label="RAM Usage")
+
+    plt.xlabel("Time (seconds)")
+    plt.ylabel("RAM Usage (MB)")
+    plt.title("Process RAM Usage Over Time")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
 
 def main() -> int:
     args = parse_args()
@@ -94,7 +172,14 @@ def main() -> int:
         logger.info("Input:  %s", args.input)
         logger.info("Output: %s", args.output)
 
-        process_file(args.input, args.output)
+        rc, elapesed, perf, peak = benchmark(args.input, args.output, args.interval)
+
+        logger.info("Exit code: %d", rc)
+        logger.info("Elapsed time: %.3f seconds", elapesed)
+        logger.info("Peak RAM: %.2f MB", peak)
+
+        if not args.no_graph:
+            plot(perf)
 
         logger.info("Processing completed successfully")
         return 0
