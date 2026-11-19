@@ -70,7 +70,7 @@ def benchmark(input_path: Path, output_path: Path, interval_ms:int = 100):
     process = subprocess.Popen(
         [
             sys.executable,
-            "src/main.py",
+            "src/main2.py",
             input_path,
             output_path,
         ],
