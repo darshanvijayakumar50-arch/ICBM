@@ -12,6 +12,7 @@ Output:
 
 import argparse
 import sys
+
 import numpy as np
 import pandas as pd
 
@@ -435,7 +436,7 @@ def run_trajectory_estimator(imu_stream, ts_unit="auto", accel_unit="auto", gyro
     consecutive_rejections = 0
     frozen_count = 0
 
-    shoe_win = max(15, min(40, int(round(0.25 / expected_dt))))
+    shoe_win = max(15, min(40, round(0.25 / expected_dt)))
     acc_buf = [data[0, 1:4].copy()]
     gyr_buf = [data[0, 4:7].copy()]
     vel_buf = [state["vel"].copy()]
@@ -655,8 +656,7 @@ def main():
         if exact_raw_ts is not None:
             n_steps = len(future_traj)
             times_sec = imu_dt * np.arange(1, n_steps + 1)
-            if times_sec[-1] > 5.0:
-                times_sec[-1] = 5.0
+            times_sec[-1] = min(times_sec[-1], 5.0)
             future_int_ts = exact_raw_ts[-1] + np.round(times_sec / ts_scale).astype(np.int64)
             all_int_ts = np.concatenate([exact_raw_ts, future_int_ts])
         else:

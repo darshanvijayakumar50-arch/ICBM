@@ -19,11 +19,11 @@ dependencies = [
 ]
 
 [project.scripts]
-icbm = "icbm:main"
 evaluate = "icbm.evaluate:main"
 degrade = "ext.degrade:main"
 simulate = "icbm.simulate:main"
 performance = "icbm.perf:main"
+estimate = "main:main"
 
 [build-system]
 requires = ["uv_build>=0.13.7,<0.14.0"]
