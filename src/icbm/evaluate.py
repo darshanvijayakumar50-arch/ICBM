@@ -1,11 +1,16 @@
 
 import argparse
 import csv
+import json
 import math
-import subprocess
-import sys
 from pathlib import Path
 
+import matplotlib.pyplot as plt
+import numpy as np
+from evo.core import sync
+from evo.core.metrics import RPE, PoseRelation, Unit
+from evo.main_ape import ape as evo_ape
+from evo.tools import file_interface
 
 # Supported CSV column names, including EuRoC ground-truth names.
 ALIASES = {
@@ -115,57 +120,570 @@ def convert_to_tum(input_csv, output_tum, timestamp_scale=1.0):
 
 
     with open(output_tum, "w") as file:
-        for pose in poses:
-            file.write(
-                " ".join(f"{v:.12f}" for v in pose) + "\n"
-            )
+        file.writelines(" ".join(f"{v:.12f}" for v in pose) + "\n" for pose in poses)
 
     print(f"Converted {input_csv} -> {output_tum}")
     print(f"Number of poses: {len(poses)}")
 
     return len(poses)
 
+def print_statistics(name, values, unit):
+    values = np.asarray(values)
 
-def run_evo(gt_file, estimated_file, output_dir, max_time_diff):
+    if values.size == 0:
+        print(f"\n{name}: No samples available.")
+        return
+
+    print(f"\n{name}")
+    print("-" * 50)
+    print(f"Samples:  {len(values)}")
+    print(f"Min:      {np.min(values):.6f} {unit}")
+    print(f"Max:      {np.max(values):.6f} {unit}")
+    print(f"Mean:     {np.mean(values):.6f} {unit}")
+    print(f"Median:   {np.median(values):.6f} {unit}")
+    print(f"Std:      {np.std(values):.6f} {unit}")
+    print(f"RMSE:     {np.sqrt(np.mean(values**2)):.6f} {unit}")
+
+def plot_results(
+    output_dir,
+    timestamps,
+    gt_positions,
+    est_positions,
+    ape_errors,
+    rpe_timestamps,
+    rpe_translation,
+    rpe_rotation,
+    dropout_seconds=5.0,
+    show=False,
+):
+    plot_dir = output_dir / "plots"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+
+    figures = []
+
+    time = timestamps - timestamps[0]
+    rpe_time = rpe_timestamps - timestamps[0]
+
+    dropout_start = timestamps[-1] - dropout_seconds
+    dropout_start_relative = dropout_start - timestamps[0]
+
+    dropout_mask = timestamps >= dropout_start
+
+    position_components = est_positions - gt_positions
+
+    def mark_dropout(ax):
+        ax.axvspan(
+            dropout_start_relative,
+            time[-1],
+            color="red",
+            alpha=0.12,
+            label="Blind 5s dropout",
+        )
+
+    def save(fig, filename):
+        fig.tight_layout()
+        fig.savefig(
+            plot_dir / filename,
+            dpi=180,
+            bbox_inches="tight",
+        )
+        figures.append(fig)
+
+    # --------------------------------------------------
+    # 1. 3D trajectory
+    # --------------------------------------------------
+
+    fig = plt.figure(figsize=(11, 8))
+    ax = fig.add_subplot(111, projection="3d")
+
+    ax.plot(
+        *gt_positions.T,
+        label="Ground truth",
+    )
+
+    ax.plot(
+        *est_positions.T,
+        label="Estimated",
+    )
+
+    ax.scatter(
+        *est_positions[dropout_mask].T,
+        label="Dropout prediction",
+        s=12,
+    )
+
+    ax.set_title("3D Trajectory Comparison")
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Y (m)")
+    ax.set_zlabel("Z (m)")
+    ax.legend()
+
+    save(fig, "trajectory_3d.png")
+
+    # --------------------------------------------------
+    # 2. XY trajectory
+    # --------------------------------------------------
+
+    fig, ax = plt.subplots(figsize=(9, 8))
+
+    ax.plot(
+        gt_positions[:, 0],
+        gt_positions[:, 1],
+        label="Ground truth",
+    )
+
+    ax.plot(
+        est_positions[:, 0],
+        est_positions[:, 1],
+        label="Estimated",
+    )
+
+    ax.scatter(
+        est_positions[dropout_mask, 0],
+        est_positions[dropout_mask, 1],
+        label="Dropout prediction",
+        s=12,
+    )
+
+    ax.set_title("XY Trajectory")
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Y (m)")
+    ax.axis("equal")
+    ax.grid(True)
+    ax.legend()
+
+    save(fig, "trajectory_xy.png")
+
+    # --------------------------------------------------
+    # 3. Absolute position error
+    # --------------------------------------------------
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+
+    ax.plot(time, ape_errors, label="Absolute position error")
+
+    mark_dropout(ax)
+
+    ax.set_title(
+        f"Absolute Position Error | RMSE: "
+        f"{np.sqrt(np.mean(ape_errors**2)):.4f} m"
+    )
+
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Position error (m)")
+    ax.grid(True)
+    ax.legend()
+
+    save(fig, "position_error.png")
+
+    # --------------------------------------------------
+    # 4. X/Y/Z error components
+    # --------------------------------------------------
+
+    fig, axes = plt.subplots(
+        3,
+        1,
+        figsize=(12, 9),
+        sharex=True,
+    )
+
+    for i, axis_name in enumerate(("X", "Y", "Z")):
+        axes[i].plot(time, position_components[:, i])
+        mark_dropout(axes[i])
+        axes[i].set_ylabel(f"{axis_name} error (m)")
+        axes[i].grid(True)
+
+    axes[0].set_title("Position Error Components")
+    axes[-1].set_xlabel("Time (s)")
+
+    save(fig, "position_components.png")
+
+    # --------------------------------------------------
+    # 5. Translational RPE
+    # --------------------------------------------------
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+
+    ax.plot(
+        rpe_time,
+        rpe_translation,
+        label="Translational RPE",
+    )
+
+    mark_dropout(ax)
+
+    ax.set_title("Translational Relative Pose Error")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Error (m)")
+    ax.grid(True)
+    ax.legend()
+
+    save(fig, "rpe_translation.png")
+
+    # --------------------------------------------------
+    # 6. Rotational RPE
+    # --------------------------------------------------
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+
+    ax.plot(
+        rpe_time,
+        rpe_rotation,
+        label="Rotational RPE",
+    )
+
+    mark_dropout(ax)
+
+    ax.set_title("Rotational Relative Pose Error")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Error (degrees)")
+    ax.grid(True)
+    ax.legend()
+
+    save(fig, "rpe_rotation.png")
+
+    # --------------------------------------------------
+    # 7. Error distribution
+    # --------------------------------------------------
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    axes[0].hist(ape_errors, bins=40, edgecolor="black")
+    axes[0].set_title("Position Error Distribution")
+    axes[0].set_xlabel("Error (m)")
+    axes[0].set_ylabel("Frequency")
+
+    sorted_errors = np.sort(ape_errors)
+    cdf = np.arange(1, len(sorted_errors) + 1) / len(sorted_errors)
+
+    axes[1].plot(sorted_errors, cdf)
+    axes[1].set_title("Position Error CDF")
+    axes[1].set_xlabel("Error (m)")
+    axes[1].set_ylabel("Cumulative probability")
+    axes[1].grid(True)
+
+    save(fig, "error_distribution.png")
+
+    # --------------------------------------------------
+    # 8. Dropout error growth
+    # --------------------------------------------------
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    dropout_elapsed = time[dropout_mask] - dropout_start_relative
+
+    ax.plot(
+        dropout_elapsed,
+        ape_errors[dropout_mask],
+        marker=".",
+        label="Position error",
+    )
+
+    ax.set_title("Position Error Growth During Blind Prediction")
+    ax.set_xlabel("Time since dropout began (s)")
+    ax.set_ylabel("Absolute position error (m)")
+    ax.grid(True)
+    ax.legend()
+
+    save(fig, "dropout_error_growth.png")
+
+    print(f"\nSaved {len(figures)} diagnostic plots to {plot_dir}")
+
+    if show:
+        plt.show()
+
+    for fig in figures:
+        plt.close(fig)
+def run_evo(
+    gt_file,
+    estimated_file,
+    output_dir,
+    max_time_diff,
+    dropout_seconds=5.0,
+    rpe_delta=1,
+    show_plots=False,
+):
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    results_file = output_dir / "ape_results.zip"
-    plot_file = output_dir / "ape_plot.pdf"
+    print("\n" + "=" * 65)
+    print("TRAJECTORY EVALUATION")
+    print("=" * 65)
 
-    command = [
-        "evo_ape",
-        "tum",
-        str(gt_file),
-        str(estimated_file),
-        "--align",
-        "--pose_relation",
-        "trans_part",
-        "--t_max_diff",
-        str(max_time_diff),
-        "--save_results",
-        str(results_file),
-        "--save_plot",
-        str(plot_file),
-        "--plot",
-        "--plot_mode",
-        "xy",
-        "--verbose",
+    # --------------------------------------------------
+    # 1. Load trajectories using evo
+    # --------------------------------------------------
+
+    traj_ref = file_interface.read_tum_trajectory_file(
+        str(gt_file)
+    )
+
+    traj_est = file_interface.read_tum_trajectory_file(
+        str(estimated_file)
+    )
+
+    print(f"Ground truth poses: {traj_ref.num_poses}")
+    print(f"Estimated poses:    {traj_est.num_poses}")
+
+    # --------------------------------------------------
+    # 2. Timestamp association using evo
+    # --------------------------------------------------
+
+    traj_ref, traj_est = sync.associate_trajectories(
+        traj_ref,
+        traj_est,
+        max_diff=max_time_diff,
+    )
+
+    if traj_ref.num_poses < 2:
+        raise ValueError("Insufficient associated trajectory poses.")
+
+    timestamps = traj_ref.timestamps.copy()
+
+    print(f"Associated poses:   {traj_ref.num_poses}")
+    print(f"Association limit:  {max_time_diff:.6f} s")
+
+    # --------------------------------------------------
+    # 3. APE using evo
+    # --------------------------------------------------
+
+    print("\n" + "=" * 65)
+    print("ABSOLUTE POSE ERROR (APE)")
+    print("=" * 65)
+
+    ape_result = evo_ape(
+        traj_ref,
+        traj_est,
+        PoseRelation.translation_part,
+        align=True,
+        correct_scale=False,
+    )
+
+    # evo has performed SE(3) alignment.
+    # traj_est now contains the aligned trajectory.
+
+    ape_errors = ape_result.np_arrays["error_array"]
+
+    gt_positions = traj_ref.positions_xyz.copy()
+    est_positions = traj_est.positions_xyz.copy()
+
+    print("\nFull trajectory:")
+    print(ape_result.pretty_str())
+
+    # --------------------------------------------------
+    # 4. Identify dropout interval
+    # --------------------------------------------------
+
+    dropout_start = timestamps[-1] - dropout_seconds
+
+    dropout_mask = timestamps >= dropout_start
+    pre_dropout_mask = timestamps < dropout_start
+
+    if not np.any(dropout_mask):
+        raise ValueError(
+            "No associated poses found in the dropout interval."
+        )
+
+    if not np.any(pre_dropout_mask):
+        raise ValueError(
+            "No associated poses found before dropout."
+        )
+
+    print("\nDropout interval:")
+    print(f"Start: {dropout_start:.6f}")
+    print(f"End:   {timestamps[-1]:.6f}")
+    print(f"Duration: {timestamps[-1] - dropout_start:.3f} s")
+
+    print_statistics(
+        "Pre-dropout APE",
+        ape_errors[pre_dropout_mask],
+        "m",
+    )
+
+    print_statistics(
+        "Blind dropout APE",
+        ape_errors[dropout_mask],
+        "m",
+    )
+
+    print_statistics(
+        "Full trajectory APE",
+        ape_errors,
+        "m",
+    )
+
+    # --------------------------------------------------
+    # 5. RPE using evo
+    # --------------------------------------------------
+
+    print("\n" + "=" * 65)
+    print("RELATIVE POSE ERROR (RPE)")
+    print("=" * 65)
+
+    if not isinstance(rpe_delta, int) or rpe_delta < 1:
+        raise ValueError(
+            "rpe_delta must be a positive integer when using frames."
+        )
+
+    # Translation RPE
+    rpe_translation_metric = RPE(
+        pose_relation=PoseRelation.translation_part,
+        delta=rpe_delta,
+        delta_unit=Unit.frames,
+    )
+
+    rpe_translation_metric.process_data(
+        (traj_ref, traj_est)
+    )
+
+    # Rotation RPE
+    rpe_rotation_metric = RPE(
+        pose_relation=PoseRelation.rotation_angle_deg,
+        delta=rpe_delta,
+        delta_unit=Unit.frames,
+    )
+
+    rpe_rotation_metric.process_data(
+        (traj_ref, traj_est)
+    )
+
+    rpe_translation = rpe_translation_metric.error.copy()
+    rpe_rotation = rpe_rotation_metric.error.copy()
+
+    rpe_result = rpe_translation_metric.get_result()
+
+    rpe_timestamps = timestamps[
+        rpe_translation_metric.delta_ids
     ]
 
-    print("\nRunning evo APE evaluation:")
-    print(" ".join(command))
-    print()
+    print(f"RPE interval: {rpe_delta} frames")
 
-    subprocess.run(command, check=True)
+    print_statistics(
+        "Translational RPE",
+        rpe_translation,
+        "m",
+    )
 
-    print("\nEvaluation completed.")
-    print(f"Results: {results_file}")
-    print(f"Plot:    {plot_file}")
+    print_statistics(
+        "Rotational RPE",
+        rpe_rotation,
+        "deg",
+    )
 
+    # --------------------------------------------------
+    # 6. Dropout-specific RPE
+    # --------------------------------------------------
 
+    # Include only relative-pose pairs whose endpoints
+    # and starting poses are both within the dropout.
+
+    rpe_start_indices = (
+        np.asarray(rpe_translation_metric.delta_ids)
+        - rpe_delta
+    )
+
+    rpe_dropout_mask = (
+        (timestamps[rpe_start_indices] >= dropout_start)
+        & (rpe_timestamps >= dropout_start)
+    )
+
+    if np.any(rpe_dropout_mask):
+        print_statistics(
+            "Dropout translational RPE",
+            rpe_translation[rpe_dropout_mask],
+            "m",
+        )
+
+        print_statistics(
+            "Dropout rotational RPE",
+            rpe_rotation[rpe_dropout_mask],
+            "deg",
+        )
+    else:
+        print(
+            "\nInsufficient RPE pairs entirely inside the dropout interval."
+        )
+
+    # --------------------------------------------------
+    # 7. Save metric results
+    # --------------------------------------------------
+
+    metrics_output = {
+        "trajectory": {
+            "associated_poses": int(traj_ref.num_poses),
+            "duration_seconds": float(
+                timestamps[-1] - timestamps[0]
+            ),
+            "dropout_seconds": float(dropout_seconds),
+            "rpe_delta_frames": int(rpe_delta),
+        },
+        "ape": {
+            "full": ape_result.stats,
+            "pre_dropout": {
+                "rmse": float(
+                    np.sqrt(np.mean(ape_errors[pre_dropout_mask] ** 2))
+                ),
+                "min": float(np.min(ape_errors[pre_dropout_mask])),
+                "max": float(np.max(ape_errors[pre_dropout_mask])),
+                "mean": float(np.mean(ape_errors[pre_dropout_mask])),
+            },
+            "dropout": {
+                "rmse": float(
+                    np.sqrt(np.mean(ape_errors[dropout_mask] ** 2))
+                ),
+                "min": float(np.min(ape_errors[dropout_mask])),
+                "max": float(np.max(ape_errors[dropout_mask])),
+                "mean": float(np.mean(ape_errors[dropout_mask])),
+            },
+        },
+        "rpe_translation": rpe_translation_metric.get_all_statistics(),
+        "rpe_rotation": rpe_rotation_metric.get_all_statistics(),
+    }
+
+    with open(
+        output_dir / "metrics.json",
+        "w",
+        encoding="utf-8",
+    ) as f:
+        json.dump(metrics_output, f, indent=4)
+
+    # Save per-pose diagnostic data.
+    np.savez_compressed(
+        output_dir / "diagnostics.npz",
+        timestamps=timestamps,
+        ape=ape_errors,
+        rpe_timestamps=rpe_timestamps,
+        rpe_translation=rpe_translation,
+        rpe_rotation=rpe_rotation,
+    )
+
+    # --------------------------------------------------
+    # 8. Generate plots
+    # --------------------------------------------------
+
+    plot_results(
+        output_dir=output_dir,
+        timestamps=timestamps,
+        gt_positions=gt_positions,
+        est_positions=est_positions,
+        ape_errors=ape_errors,
+        rpe_timestamps=rpe_timestamps,
+        rpe_translation=rpe_translation,
+        rpe_rotation=rpe_rotation,
+        dropout_seconds=dropout_seconds,
+        show=show_plots,
+    )
+
+    print("\n" + "=" * 65)
+    print("EVALUATION COMPLETED")
+    print("=" * 65)
+
+    print(f"Metrics:      {output_dir / 'metrics.json'}")
+    print(f"Diagnostics:  {output_dir / 'diagnostics.npz'}")
+    print(f"Plots:        {output_dir / 'plots'}")
+    
 def main():
     parser = argparse.ArgumentParser(
-        description="Evaluate estimated trajectory using evo SE(3) alignment"
+        description="Evaluate estimated trajectory using evo APE/RPE"
     )
 
     parser.add_argument(
@@ -207,6 +725,27 @@ def main():
         help="Maximum timestamp association difference in seconds",
     )
 
+    parser.add_argument(
+        "--dropout-seconds",
+        type=float,
+        default=5.0,
+        help="Duration of the final blind prediction interval",
+    )
+
+    parser.add_argument(
+        "--rpe-delta",
+        type=int,
+        default=1,
+        help="RPE interval in seconds",
+    )
+
+    parser.add_argument(
+        "--plots",
+        choices=["none", "all"],
+        default="none",
+        help="Save plots always; optionally display all plots",
+    )
+
     args = parser.parse_args()
 
     if not args.ground_truth.exists():
@@ -215,10 +754,21 @@ def main():
     if not args.estimated.exists():
         parser.error(f"Estimated trajectory not found: {args.estimated}")
 
+    if args.dropout_seconds <= 0:
+        parser.error("--dropout-seconds must be positive")
+
+    if args.rpe_delta <= 0:
+        parser.error("--rpe-delta must be positive")
+
+    if args.max_time_diff < 0:
+        parser.error("--max-time-diff cannot be negative")
+
     args.output.mkdir(parents=True, exist_ok=True)
 
     gt_tum = args.output / "ground_truth.tum"
     est_tum = args.output / "estimated.tum"
+
+    print("Converting trajectories to TUM format...")
 
     convert_to_tum(
         args.ground_truth,
@@ -233,10 +783,13 @@ def main():
     )
 
     run_evo(
-        gt_tum,
-        est_tum,
-        args.output,
-        args.max_time_diff,
+        gt_file=gt_tum,
+        estimated_file=est_tum,
+        output_dir=args.output,
+        max_time_diff=args.max_time_diff,
+        dropout_seconds=args.dropout_seconds,
+        rpe_delta=args.rpe_delta,
+        show_plots=args.plots == "all",
     )
 
 

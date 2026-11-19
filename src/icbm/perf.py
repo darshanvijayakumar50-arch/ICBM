@@ -1,15 +1,13 @@
 import argparse
 import logging
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
 
-import psutil
-import sys
-from pathlib import Path
-
 import matplotlib.pyplot as plt
+import psutil
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +70,7 @@ def benchmark(input_path: Path, output_path: Path, interval_ms:int = 100):
     process = subprocess.Popen(
         [
             sys.executable,
-            "main.py",
+            "src/main.py",
             input_path,
             output_path,
         ],
