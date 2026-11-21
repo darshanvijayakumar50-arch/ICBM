@@ -46,6 +46,15 @@ def find_columns(fieldnames):
 
     return columns
 
+def check_tum(input_csv):
+    with open(input_csv) as f:
+        header = f.readline()
+
+    commas = header.count(',')
+    if commas < 2:
+        print("Header has no commas, likely tum")
+        return True
+    return False
 
 def convert_to_tum(input_csv, output_tum, timestamp_scale=1.0):
     """
@@ -56,6 +65,10 @@ def convert_to_tum(input_csv, output_tum, timestamp_scale=1.0):
     """
 
     poses = []
+
+    if check_tum(input_csv):
+        with open(output_tum, "w") as file, open(input_csv) as f:
+            file.write(f.read())
 
     with open(input_csv, newline="") as file:
         reader = csv.DictReader(file)
