@@ -1,4 +1,3 @@
-# Arthi
 #!/usr/bin/env python3
 """
 Path Finder (Track 03) - IMU-only 6-DoF trajectory estimation under sensor degradation.
@@ -28,22 +27,28 @@ KI = 0.005              # gyro-bias correction gain
 KP_RECOVER = 1.0        # stronger tilt correction right after a dropout
 RECOVER_SECONDS = 1.0
 GATE = 1.0              # m/s^2: accel correction fades out as | |a|-g | approaches this
-BLIND_AFTER = 2.5       # s of continuous invalid data => IMU considered dead
+BLIND_AFTER = 0.5       # s of continuous invalid data => IMU considered dead
+SPIKE_A = 3.0           # m/s^2: per-sample accel jump treated as a spike (0 = off)
+SPIKE_G = 0.4           # rad/s: per-sample gyro jump treated as a spike
 BLIND_TAU = 8.0         # s: velocity decay time constant while IMU is dead
 VEL_LEAK_TAU = 0.0      # s: leak on velocity while IMU is alive (0 = off)
 NOMINAL_G = 9.80665
 
 ZERO6 = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+TS_MULT = 1.0           # multiplier that converts the file's timestamps to ns (set automatically)
 
 
 def parse(line):
     """Return (timestamp_ns or None, 6-tuple of floats or None if row is unusable)."""
     p = line.split(',')
     try:
-        ts = int(p[0])
+        if TS_MULT == 1.0:
+            ts = int(p[0])
+        else:
+            ts = int(float(p[0]) * TS_MULT + 0.5)
     except (ValueError, IndexError):
         try:
-            ts = int(float(p[0]))
+            ts = int(float(p[0]) * TS_MULT)
         except (ValueError, IndexError):
             ts = None
     try:
@@ -87,6 +92,33 @@ def open_input(path):
                 return io.TextIOWrapper(zf.open(n), encoding='utf-8', errors='replace'), zf
         sys.exit('ERROR: imu0/data.csv not found inside zip ' + path)
     return open(path, 'r', encoding='utf-8', errors='replace'), None
+
+
+def detect_ts_mult(path):
+    """Guess the timestamp unit from the median spacing of the first rows (like the organizers' script)."""
+    inp, zf = open_input(path)
+    vals = []
+    for line in inp:
+        try:
+            vals.append(float(line.split(',')[0]))
+        except ValueError:
+            continue
+        if len(vals) >= 60:
+            break
+    inp.close()
+    if zf is not None:
+        zf.close()
+    d = sorted(vals[i + 1] - vals[i] for i in range(len(vals) - 1) if vals[i + 1] > vals[i])
+    if not d:
+        return 1.0
+    med = d[len(d) // 2]
+    if med < 1.0:
+        return 1e9          # seconds
+    if med < 1e3:
+        return 1e6          # milliseconds
+    if med < 1e6:
+        return 1e3          # microseconds
+    return 1.0              # nanoseconds
 
 
 def process(inp, out, blind_extra_s):
@@ -134,6 +166,14 @@ def process(inp, out, blind_extra_s):
     nominal_s = nominal_ns * 1e-9
     gap_ns = GAP_FACTOR * nominal_ns
 
+    swap = False                       # True if file has accel columns first (cols 1-3)
+    if n > 0:
+        m3 = _sqrt((sgx / n) ** 2 + (sgy / n) ** 2 + (sgz / n) ** 2)
+        m6 = _sqrt((sax / n) ** 2 + (say / n) ** 2 + (saz / n) ** 2)
+        if m3 > 5.0 and m6 < 5.0:
+            swap = True
+            sgx, sgy, sgz, sax, say, saz = sax, say, saz, sgx, sgy, sgz
+
     if n > 0:
         bx, by, bz = sgx / n, sgy / n, sgz / n
         fx, fy, fz = sax / n, say / n, saz / n
@@ -145,7 +185,11 @@ def process(inp, out, blind_extra_s):
     else:
         bx = by = bz = 0.0
         G = NOMINAL_G
+        fx, fy, fz = 0.0, 0.0, G
         ux, uy, uz = 0.0, 0.0, 1.0
+    pgx, pgy, pgz = bx, by, bz          # previous accepted sample (for spike rejection)
+    pax, pay, paz = fx, fy, fz
+    rej = 0
 
     # initial orientation: rotate measured "up" (body frame) onto world +Z, yaw = 0
     if uz > -0.999999:
@@ -199,7 +243,8 @@ def process(inp, out, blind_extra_s):
             # ---- dropped / invalid row: coast ----
             invalid_t += dt
             px, py, pz, vx, vy, vz = coast(px, py, pz, vx, vy, vz, dt, invalid_t > BLIND_AFTER)
-            recover_t = RECOVER_SECONDS
+            if invalid_t > 0.1:
+                recover_t = RECOVER_SECONDS
             write(fmt % (fmt_ts(ts), px, py, pz, qx, qy, qz, qw))
             rows += 1
             continue
@@ -211,10 +256,22 @@ def process(inp, out, blind_extra_s):
             invalid_t += hole
             px, py, pz, vx, vy, vz = coast(px, py, pz, vx, vy, vz, hole, invalid_t > BLIND_AFTER)
             dt = nominal_s
-            recover_t = RECOVER_SECONDS
+            if hole > 0.1:
+                recover_t = RECOVER_SECONDS
         invalid_t = 0.0
 
-        gx, gy, gz, ax, ay, az = v
+        if swap:
+            ax, ay, az, gx, gy, gz = v
+        else:
+            gx, gy, gz, ax, ay, az = v
+        if SPIKE_A > 0.0:
+            if (rej < 3 and (abs(ax - pax) > SPIKE_A or abs(ay - pay) > SPIKE_A or abs(az - paz) > SPIKE_A
+                             or abs(gx - pgx) > SPIKE_G or abs(gy - pgy) > SPIKE_G or abs(gz - pgz) > SPIKE_G)):
+                rej += 1                   # spike: hold the previous accepted sample
+                ax, ay, az, gx, gy, gz = pax, pay, paz, pgx, pgy, pgz
+            else:
+                rej = 0
+                pax, pay, paz, pgx, pgy, pgz = ax, ay, az, gx, gy, gz
         wx = gx - bx
         wy = gy - by
         wz = gz - bz
@@ -305,10 +362,11 @@ def main(argv):
         print(__doc__)
         return 2
     inp_path = argv[1]
-    out_path = argv[2]
+    out_path = 'estimated_trajectory.txt'
     blind = 0.0
     meta = None
-    i = 3
+    ts_unit = 'auto'
+    i = 2
     while i < len(argv):
         a = argv[i]
         if a == '-o':
@@ -317,6 +375,8 @@ def main(argv):
             blind = float(argv[i + 1]); i += 2
         elif a == '--meta':
             meta = argv[i + 1]; i += 2
+        elif a == '--ts-unit':
+            ts_unit = argv[i + 1]; i += 2
         elif a == '--set':
             name, val = argv[i + 1].split('=')
             if name not in globals() or name in ('ZERO6',):
@@ -328,6 +388,11 @@ def main(argv):
             return 2
 
     t0 = time.perf_counter()
+    global TS_MULT
+    if ts_unit == 'auto':
+        TS_MULT = detect_ts_mult(inp_path)
+    else:
+        TS_MULT = {'s': 1e9, 'ms': 1e6, 'us': 1e3, 'ns': 1.0}[ts_unit]
     inp, zf = open_input(inp_path)
     with open(out_path, 'w', buffering=1 << 16) as out:
         rows, dur, nominal_s = process(inp, out, blind)
