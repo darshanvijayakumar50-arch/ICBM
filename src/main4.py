@@ -305,10 +305,10 @@ def main(argv):
         print(__doc__)
         return 2
     inp_path = argv[1]
-    out_path = 'estimated_trajectory.txt'
+    out_path = argv[2]
     blind = 0.0
     meta = None
-    i = 2
+    i = 3
     while i < len(argv):
         a = argv[i]
         if a == '-o':
@@ -358,4 +358,3 @@ def main(argv):
 
 if __name__ == '__main__':
     sys.exit(main(sys.argv))
-    
