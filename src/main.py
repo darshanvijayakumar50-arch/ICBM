@@ -58,7 +58,7 @@ def quat_rotate_inv(q, v):
 class LowMemoryInertialEstimator:
     """
     Zero-bloat 6-DOF IMU Trajectory Estimator using pure Python math.
-    O(1) streaming memory, < 0.02 ms per sample.
+    O(1) streaming memory, < 20 ms per second of input.
     """
     def __init__(self, g_mag=9.80665):
         self.p = [0.0, 0.0, 0.0]
@@ -298,9 +298,12 @@ def run_trajectory_estimation(imu_csv_path, output_csv_path):
     print(f"Saved {count} poses to '{output_csv_path}' (avg latency: {total_ms / max(1, count):.4f} ms)")
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("input_imu", nargs="?", default="imu0/data.csv", help="Input degraded IMU CSV")
     parser.add_argument("output_est", nargs="?", default="estimated_trajectory.txt", help="Output estimated trajectory CSV")
     args = parser.parse_args()
     run_trajectory_estimation(args.input_imu, args.output_est)
+
+if __name__ == "__main__":
+    main()

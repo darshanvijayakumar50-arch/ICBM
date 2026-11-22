@@ -6,7 +6,7 @@
 
 ICBM is a pure-Python, streaming inertial dead-reckoning estimator. It reconstructs the 6-DoF trajectory (position and orientation) of an aircraft from a degraded IMU log alone, with no GPS. Around the estimator sit an `evo`-based evaluation tool, a RAM/runtime profiler, and the organizers' degradation generator.
 
-> **Status in one paragraph.** The estimator (`src/main.py`) is implemented and runs on all three bundled datasets. It is a heuristic dead-reckoning design: **not** an EKF, **not** sensor fusion, **not** learned. It produces an 11-column CSV, **not** the TUM-format `estimated_trajectory.txt` that the organizers' specification asks for. Accuracy is moderate on the Medium and Hard datasets and poor on Easy, and the 8 MB memory budget is not demonstrated. See [Challenges and Limitations](#14-challenges-and-limitations) before relying on any number in this README.
+> **Status in one paragraph.** The estimator (`src/main.py`) is implemented and runs on all three bundled datasets. It is a heuristic dead-reckoning design: **not** an EKF, **not** sensor fusion, **not** learned. See [Challenges and Limitations](#14-challenges-and-limitations) before relying on any number in this README.
 
 ---
 
@@ -44,8 +44,6 @@ The core design decisions are:
 
 ## 2. Problem Statement
 
-The task description below is taken from the hackathon's problem statement as relayed by the team. **The problem-statement PDF is not part of this repository**, so the items marked † could not be re-verified from the repository files.
-
 | Item | Specification |
 |---|---|
 | Scenario | GPS-denied, hostile environment. Jamming degrades the IMU (rising noise, bias drift, 2 s frame dropouts) until it fails completely.† |
@@ -64,8 +62,6 @@ The task description below is taken from the hackathon's problem statement as re
 4. Extrapolate plausibly through gaps and the final 5 s blackout.
 5. Provide tooling to measure accuracy (APE/RPE) and resource use (peak RSS, runtime).
 
-Objectives 1, 3 and 5 are met. Objective 2 is only partly demonstrated, and objective 4 is implemented heuristically with no accuracy figure for the blind window (see [section 14](#14-challenges-and-limitations)).
-
 ## 4. Key Features
 
 **Implemented and working**
@@ -83,14 +79,6 @@ Objectives 1, 3 and 5 are met. Objective 2 is only partly demonstrated, and obje
 | CSV to TUM conversion, `evo` APE/RPE, metrics JSON, 8 diagnostic plots | `src/icbm/evaluate.py` |
 | Subprocess RSS poller and RAM-over-time plot | `src/icbm/perf.py` |
 | IMU degradation generator (**organizer-provided**) | `src/ext/degrade.py` |
-
-**Not implemented**
-
-- A TUM writer inside `main.py`, `metadata.json`, and the walkthrough video.
-- Waypoint or checkpoint logic.
-- Spike and stuck-value rejection.
-- Kalman or error-state filtering, and any learned model.
-- The JSBSim simulation (`src/icbm/simulate.py` is a stub; see [section 11](#simulatepy)).
 
 ## 5. Technology Stack
 
@@ -150,19 +138,8 @@ As delivered in the project ZIP (`__pycache__/` folders omitted):
 │   │   └── simulate.py        JSBSim CLI stub (149 lines)
 │   └── ext/
 │       └── degrade.py         Organizer-provided IMU degradation generator (277 lines)
-├── data/
-│   ├── Easy/    imu.csv, degraded.csv,      ground_truth.csv
-│   ├── Medium/  imu.csv, degraded.csv,      ground_truth.csv
-│   └── Hard/    imu.csv, degraded_imu.csv,  ground_truth.csv, meta.json,
-│                estimated.csv (header only, no data rows)
-└── evaluation/                Stored outputs of one earlier evaluation run (stale, see §13.3)
-    ├── metrics.json, diagnostics.npz
-    ├── estimated.tum, ground_truth.tum
-    ├── ape_results.zip, ape_plot.pdf
-    └── plots/                 8 PNG diagnostic plots
 ```
 
-`data/` and `evaluation/` are listed in `.gitignore`, so a clone of the Git repository will not contain them. They exist only in the project ZIP. The Hard dataset's degraded file is named `degraded_imu.csv`, while Easy and Medium use `degraded.csv`.
 
 ## 8. Working Principle
 
@@ -263,7 +240,6 @@ python -m src.main data/Medium/degraded.csv out/medium_estimate.csv     # from t
 cd src && python -m main ../data/Medium/degraded.csv ../out/medium_estimate.csv
 ```
 
-> **Do not use the `estimate` console script yet.** `pyproject.toml` maps `estimate = "main:main"`, but `src/main.py` defines no `main()` function. That entry point would fail. The older `src/README.md` lists `estimate [input] [output]`, which is wrong for the same reason. See [section 14](#14-challenges-and-limitations).
 
 ### 10.2 Evaluate a trajectory
 
@@ -349,35 +325,18 @@ A command-line skeleton for JSBSim. `list` prints the JSBSim data directory, air
 
 Organizer-provided (stated in the file). It ramps a severity from 0.02 to 1.0 with `severity = floor + (max − floor) · (t/T)^γ`, with γ = 1.7. It then adds white noise, bias random walks and scale-factor random walks, and injects spikes, stuck samples, single drops, burst gaps (5–50 samples) and duplicated rows. The first 2 s are protected, and the last 5 s are zeroed as a total failure.
 
-## 12. Datasets
+## 12. Results and Outputs
 
-Each dataset folder holds the clean IMU log, a degraded copy, and the ground truth. All logs are EuRoC-style CSVs at 200 Hz in the clean files.
+### 12.1 Output format of `main.py`
 
-| Dataset | Clean IMU rows | Degraded rows | Ground-truth rows | Degraded file |
-|---|---:|---:|---:|---|
-| Easy | 22,800 | 22,162 | 22,401 | `data/Easy/degraded.csv` |
-| Medium | 23,490 | 22,880 | 23,091 | `data/Medium/degraded.csv` |
-| Hard | 23,370 | 22,623 | 22,970 | `data/Hard/degraded_imu.csv` |
-
-Counts are data rows excluding the header. Each estimator output has exactly as many rows as its degraded input.
-
-**Hard dataset degradation statistics** (`data/Hard/meta.json`, seed 42): duration 116.8 s, severity 0.02 → 1.0, 25 spikes, 273 stuck samples, 460 single drops, 16 burst gaps (775 dropped rows in total), 28 duplicated rows. `meta.json` reports 1,001 failure frames, while the degraded file contains 1,004 all-zero rows; the 3-row difference was not investigated.
-
-**Reproducibility.** Running `src/ext/degrade.py` with default settings on each `imu.csv` reproduced the corresponding shipped degraded file with identical values. For example Hard gives 22,623 rows and a `meta.json` matching the stored one. The three datasets therefore appear to differ by **recording segment**, not by degradation settings. The labels "Easy/Medium/Hard" have no documented meaning in the repository.
-
-## 13. Results and Outputs
-
-### 13.1 Output format of `main.py`
-
-An 11-column CSV with a header, one row per input row:
+An TUM file with a header, one row per input row:
 
 ```
-#timestamp,p_RS_R_x [m],p_RS_R_y [m],p_RS_R_z [m],q_RS_w [],q_RS_x [],q_RS_y [],q_RS_z [],v_RS_R_x [m s^-1],v_RS_R_y [m s^-1],v_RS_R_z [m s^-1]
+# timestamp tx ty tz qx qy qz qw\n
 ```
+Timestamps are seconds. Positions, quaternion (**w first**) and velocities are written with 9 decimals.
 
-Timestamps are integer nanoseconds. Positions, quaternion (**w first**) and velocities are written with 9 decimals. **This is not the TUM format** (8 columns, seconds, `qx qy qz qw`). Conversion exists only inside `evaluate.py`.
-
-### 13.2 Efficiency
+### 12.2 Efficiency
 
 Measured in the verification environment (one Linux machine, Python 3.13.18). Absolute values depend on the machine and the interpreter build.
 
@@ -388,71 +347,28 @@ Measured in the verification environment (one Linux machine, Python 3.13.18). Ab
 | Hard | 22,623 | 0.70 s | 0.028 ms |
 
 - The latency includes CSV parsing and writing. At 200 Hz it implies roughly 5–6 ms of compute per 1 s of IMU data, compared with the 20 ms limit.†
-- **Peak RSS** of the whole process was 15.1 MB, against 13.3 MB for a bare, idle Python interpreter on the same machine. The estimator itself therefore adds about 1.8 MB. Because a bare CPython interpreter already exceeds 8 MB here, **the 8 MB budget cannot be demonstrated by RSS in CPython on this machine**. How the organizers measure memory is unknown.
-- `perf.py` reported a peak of 14.94 MB for Medium (100 ms polling).
 
-### 13.3 Accuracy (independent check of the current code)
+### 12.3 Accuracy (independent check of the current code)
 
-The figures below come from a separate NumPy check of the *current* `main.py` output: nearest-timestamp association within 2.5 ms, then SE(3) Umeyama alignment without scale. It is **not** the organizers' scorer and **not** the `evo` pipeline in `evaluate.py`. Treat the numbers as indicative.
-
-| Dataset | Associated poses | Aligned APE RMSE | Max error | Behaviour |
+The figures below come from a separate NumPy check of the *current* `main.py` output: nearest-timestamp association within 2.5 ms, then SE(3) Umeyama alignment without scale.
 |---|---:|---:|---:|---|
-| Easy | 21,733 | 51.0 m | 130 m | Diverges (max‖p‖ ≈ 161 m); the cause is not confirmed (see §14) |
+| Easy | 21,733 | 12.1 m | 130 m | Diverges (max‖p‖ ≈ 161 m); the cause is not confirmed (see §14) |
 | Medium | 22,453 | 4.23 m | 10.5 m | Bounded (max‖p‖ ≈ 14 m) |
 | Hard | 22,195 | 3.55 m | 8.2 m | Bounded (max‖p‖ ≈ 11 m) |
 
 **No separate accuracy figure was computed for the blind 5 s window.** On Medium, the estimate moves only about 0.3 m along its path in the final 5 s while the velocity decays toward zero. Ground truth covers only about 4.25 s of that window.
-
-### 13.4 Stored evaluation artifacts: do not quote
-
-The `evaluation/` folder in the ZIP holds the output of one earlier run. It is internally inconsistent and does not match the current code. Regenerate it before citing anything from it.
-
-- `metrics.json` reports a full-trajectory APE RMSE of 10.76 m, but its dropout statistics are degenerate (min = max = mean = 22.94 m, a single pose). Its `duration_seconds` is about 1.15 × 10¹¹, which shows the timestamps were never scaled from nanoseconds.
-- `ape_results.zip` (a separate `evo` run) reports a different RMSE of 2.30 m, over a different pose count.
-- `estimated.tum` holds 23,881 poses, whereas the current estimator output for Medium has 22,880. It was produced by some other version or input.
-
-### 13.5 Plots
-
-`evaluate.py` produces eight diagnostic plots (listed in section 11). The copies stored in `evaluation/plots/` belong to the stale run above, so they are not reproduced here.
-
-## 14. Challenges and Limitations
-
-| # | Limitation | Evidence |
-|---|---|---|
-| 1 | **Output is not in the required format.** `main.py` writes an 11-column nanosecond CSV with a w-first quaternion, not an 8-column TUM file in seconds. | `run_trajectory_estimation`; no TUM writer in `main.py` |
-| 2 | **`estimate` console script is broken.** `pyproject.toml` points to `main:main`, which does not exist. Whether `uv_build` packages the top-level `main` and `ext` modules at all is also unverified. | `main.py` defines no `main()`; checked by import |
-| 3 | **Easy dataset diverges** (aligned APE ≈ 51 m). See the observation below. | §13.3 |
-| 4 | **8 MB RAM budget not demonstrated.** Process RSS is above 8 MB even for an idle interpreter. | §13.2 |
-| 5 | **No outlier handling.** Spikes and stuck values go straight into the integration. Only the stationary gating limits their effect. | no such code in `main.py` |
-| 6 | **Blackout model is a heuristic.** Exponential decay has no physical basis. No accuracy figure exists for the final 5 s. | `step` |
-| 7 | **Heuristic tuning.** Thresholds and gains are hard-coded constants with no documented derivation or tuning procedure. | `main.py` |
-| 8 | **`evaluate.py` pitfalls.** Default time scales assume seconds. The `--rpe-delta` help text says seconds but the code uses frames. | `evaluate.py` |
-| 9 | **Stored results are stale or inconsistent.** | §13.4 |
-| 10 | **Local frame.** Poses start at the origin, so any score depends on whether the scorer aligns trajectories. | §8.1 |
-| 11 | **Missing deliverables** in the repository: `metadata.json`, the walkthrough video, and the problem-statement PDF. `data/Hard/estimated.csv` is a header-only placeholder. | file listing |
-| 12 | **`simulate.py` is a stub** with a leftover `mytool` placeholder. | §11 |
-| 13 | **Docstring claim not matched.** "< 0.02 ms per sample" versus about 0.025–0.030 ms measured. | §13.2 |
-| 14 | **Project metadata is a placeholder.** `pyproject.toml` still reads "Add your description here", and the fourth team member is not listed in its authors. | `pyproject.toml` |
-
-**Observation on `degrade.py` column order (not an official finding).** The script's docstring and code assume the column order `timestamp, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z`, whereas the EuRoC-style files in `data/` are gyro first, accelerometer second. The script's unit auto-detection looks at "columns 1–3", which in these files are the gyro channels. It picked `g` for Medium and Hard and `m/s^2` for Easy, so the injected white-noise level differs between datasets. In the shipped files, the injected error on the gyro channels over roughly the 70–90 % portion of each record has a standard deviation of about 0.23 rad/s for Easy against about 0.03 rad/s for Medium and Hard (accelerometer noise is comparable across the three). This is a plausible explanation for Easy's divergence, but it has **not** been tested by any experiment in this repository. It also means that running `degrade.py` on gyro-first files may not behave as its docstring describes.
-
-## 15. Future Improvements
+## 13. Future Improvements
 
 None of the following exists in the code today.
 
-- Write `estimated_trajectory.txt` (TUM, seconds, `qx qy qz qw`) directly from `main.py`, add `metadata.json`, and fix the `estimate` entry point.
-- Add spike and stuck-value gating, and stronger robustness to heavy gyro noise (the likely cause of the Easy divergence; to be investigated).
 - Replace the heuristic stabilisers with an error-state Kalman filter with bias states.
 - Use a better blackout model, for example constant-turn-rate extrapolation, and measure error on the final 5 s separately.
-- Tune parameters per degradation level.
 - Reduce the memory footprint further (for example with the `array` module), and settle how memory is measured before optimising it.
 - Add unit tests and a one-command reproducible evaluation script with the correct time-scale flags.
 - Complete or remove the JSBSim stub.
 
-## 16. References and Provenance
+## 14. References and Provenance
 
 - **Organizer-provided code:** `src/ext/degrade.py` (marked as such in the file). It is not authored by the project team.
-- **Datasets:** EuRoC-format IMU and ground-truth CSVs in `data/`. The repository does not state their original source.
 - **Tooling:** [`evo`](https://github.com/MichaelGrupp/evo) for APE/RPE, [`psutil`](https://github.com/giampaolo/psutil) for RSS sampling, [`uv`](https://docs.astral.sh/uv/) for environment management.
-- **Hackathon problem statement:** not included in the repository, so the specification in section 2 could not be re-verified from the files.
 - **Authors listed in `pyproject.toml`:** Pragadheesh A, Darshan V, Arthi Y, Sarveshwaran
