@@ -227,11 +227,11 @@ def run_trajectory_estimation(imu_csv_path, output_csv_path):
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
-    # Pass 1: Read only the first 300 valid rows for static calibration
+    # Pass 1: Read up to 300 valid rows for static calibration
     head_samples = []
     with open(imu_csv_path, "r", newline="") as f_in:
         reader = csv.reader(f_in)
-        next(reader, None)
+        next(reader, None)  # Skip header
         for row in reader:
             if not row or len(row) < 7:
                 continue
@@ -249,48 +249,48 @@ def run_trajectory_estimation(imu_csv_path, output_csv_path):
     estimator.calibrate_from_head(head_samples)
     del head_samples
 
-    # Pass 2: True O(1) streaming from input CSV directly
+    # Pass 2: True O(1) streaming — strictly 1 output pose per input IMU row
     prev_ts = None
     count = 0
     total_ms = 0.0
 
     with open(imu_csv_path, "r", newline="") as f_in, open(output_csv_path, "w", newline="") as f_out:
         reader = csv.reader(f_in)
+        
 
-        next(reader, None)
-        f_out.write(
-            "#timestamp "
-            "p_RS_R_x [m] p_RS_R_y [m] p_RS_R_z [m] "
-            "q_RS_w [] q_RS_x [] q_RS_y [] q_RS_z [] "
-            "v_RS_R_x [m s^-1], v_RS_R_y [m s^-1], v_RS_R_z [m s^-1] "
-        )
-
+        next(reader, None)  # Skip input header
+        f_out.write("# timestamp tx ty tz qx qy qz qw\n")
         for row in reader:
-            if not row or len(row) < 7:
+            if not row:  # Ignore trailing empty newline at EOF
                 continue
 
             t0 = time.perf_counter()
-            curr_ts = int(float(row[0]))
+
+            # Parse timestamp safely
+            try:
+                curr_ts = int(float(row[0]))
+            except (ValueError, IndexError):
+                curr_ts = prev_ts if prev_ts is not None else 0
+
             dt = 0.0 if prev_ts is None else (curr_ts - prev_ts) * 1e-9
             prev_ts = curr_ts
 
-            try:
-                omega_m = (float(row[1]), float(row[2]), float(row[3]))
-                acc_m = (float(row[4]), float(row[5]), float(row[6]))
-                dead = is_invalid_sample(omega_m, acc_m)
-            except ValueError:
+            # Parse IMU measurements; fall back to blackout propagation if corrupt/missing
+            if len(row) >= 7:
+                try:
+                    omega_m = (float(row[1]), float(row[2]), float(row[3]))
+                    acc_m = (float(row[4]), float(row[5]), float(row[6]))
+                    dead = is_invalid_sample(omega_m, acc_m)
+                except ValueError:
+                    omega_m, acc_m, dead = None, None, True
+            else:
                 omega_m, acc_m, dead = None, None, True
 
             if dt > 0.0:
                 estimator.step(dt, omega_m=omega_m, acc_m=acc_m, is_blackout=(dead or dt > 0.05))
 
             qw, qx, qy, qz = estimator.q
-            out_dir.writerow(
-                curr_ts,
-                f"{estimator.p[0]:.9f}", f"{estimator.p[1]:.9f}", f"{estimator.p[2]:.9f},",
-                f"{qw:.9f}", f"{qx:.9f}", f"{qy:.9f}", f"{qz:.9f}, ",
-                f"{estimator.v[0]:.9f}", f"{estimator.v[1]:.9f}", f"{estimator.v[2]:.9f}"
-            )
+            f_out.write(f"{curr_ts*1e-9} {estimator.p[0]:.9f} {estimator.p[1]:.9f} {estimator.p[2]:.9f} {qx:.9f} {qy:.9f} {qz:.9f} {qw:.9f}\n")
 
             total_ms += (time.perf_counter() - t0) * 1e3
             count += 1
@@ -300,7 +300,7 @@ def run_trajectory_estimation(imu_csv_path, output_csv_path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("input_imu", help="Input degraded IMU CSV", default="imu0/data.csv")
-    parser.add_argument("output_est", help="Output estimated trajectory CSV", default="estimated_trajectory.txt")
+    parser.add_argument("input_imu", nargs="?", default="imu0/data.csv", help="Input degraded IMU CSV")
+    parser.add_argument("output_est", nargs="?", default="estimated_trajectory.txt", help="Output estimated trajectory CSV")
     args = parser.parse_args()
     run_trajectory_estimation(args.input_imu, args.output_est)
