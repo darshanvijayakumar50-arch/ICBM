@@ -300,7 +300,7 @@ def run_trajectory_estimation(imu_csv_path, output_csv_path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("input_imu", help="Input degraded IMU CSV", default="data/imu0.csv")
+    parser.add_argument("input_imu", help="Input degraded IMU CSV", default="imu0/data.csv")
     parser.add_argument("output_est", help="Output estimated trajectory CSV", default="estimated_trajectory.txt")
     args = parser.parse_args()
     run_trajectory_estimation(args.input_imu, args.output_est)
