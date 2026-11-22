@@ -24,10 +24,10 @@ ICBM is a pure-Python, streaming inertial dead-reckoning estimator. It reconstru
 9. [Installation and Setup](#9-installation-and-setup)
 10. [Execution Instructions](#10-execution-instructions)
 11. [Code Explanation](#11-code-explanation)
-12. [Results and Outputs](#13-results-and-outputs)
-13. [Future Improvements](#15-future-improvements)
-14. [References and Provenance](#16-references-and-provenance)
-
+12. [Results and Outputs](#12-results-and-outputs)
+13. [Future Improvements](#13-future-improvements)
+14. [References and Provenance](#14-references-and-provenance)
+15. [AI disclosure](#15-ai-disclosure)
 ---
 
 ## 1. Project Overview
@@ -371,3 +371,8 @@ None of the following exists in the code today.
 - **Organizer-provided code:** `src/ext/degrade.py` (marked as such in the file). It is not authored by the project team.
 - **Tooling:** [`evo`](https://github.com/MichaelGrupp/evo) for APE/RPE, [`psutil`](https://github.com/giampaolo/psutil) for RSS sampling, [`uv`](https://docs.astral.sh/uv/) for environment management.
 - **Authors listed in `pyproject.toml`:** Pragadheesh A, Darshan V, Arthi Y, Sarveshwaran
+## 15. AI Disclosure
+The following AI tools were used to assist project development:
+- Claude sonnet 5.5
+- Gemini 4 hydrogen
+- Chatgpt 5.6 luna
