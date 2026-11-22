@@ -3,6 +3,7 @@
 **Hackathon track:** Track 03, *Path Finder: Trajectory Estimation Under Sensor Degradation*
 **Team:** VITC_ICBM, Vellore Institute of Technology (Chennai)
 **Members:** Darshan V, Pragadheesh A, Arthi Y, C K Sarveshwaran
+**Presentation and pipeline walkthrough video:** https://drive.google.com/drive/folders/1XINLk_dCE2R5WVKGpwgxSDoGY7hlhHBx
 
 ICBM is a pure-Python, streaming inertial dead-reckoning estimator. It reconstructs the 6-DoF trajectory (position and orientation) of an aircraft from a degraded IMU log alone, with no GPS. Around the estimator sit an `evo`-based evaluation tool, a RAM/runtime profiler, and the organizers' degradation generator.
 
