@@ -249,22 +249,21 @@ def run_trajectory_estimation(imu_csv_path, output_csv_path):
     estimator.calibrate_from_head(head_samples)
     del head_samples
 
-    # Pass 2: True O(1) streaming from input CSV directly to output CSV
+    # Pass 2: True O(1) streaming from input CSV directly
     prev_ts = None
     count = 0
     total_ms = 0.0
 
     with open(imu_csv_path, "r", newline="") as f_in, open(output_csv_path, "w", newline="") as f_out:
         reader = csv.reader(f_in)
-        writer = csv.writer(f_out)
 
         next(reader, None)
-        writer.writerow([
-            "#timestamp",
-            "p_RS_R_x [m]", "p_RS_R_y [m]", "p_RS_R_z [m]",
-            "q_RS_w []", "q_RS_x []", "q_RS_y []", "q_RS_z []",
-            "v_RS_R_x [m s^-1]", "v_RS_R_y [m s^-1]", "v_RS_R_z [m s^-1]",
-        ])
+        f_out.write(
+            "#timestamp "
+            "p_RS_R_x [m] p_RS_R_y [m] p_RS_R_z [m] "
+            "q_RS_w [] q_RS_x [] q_RS_y [] q_RS_z [] "
+            "v_RS_R_x [m s^-1], v_RS_R_y [m s^-1], v_RS_R_z [m s^-1] "
+        )
 
         for row in reader:
             if not row or len(row) < 7:
@@ -286,12 +285,12 @@ def run_trajectory_estimation(imu_csv_path, output_csv_path):
                 estimator.step(dt, omega_m=omega_m, acc_m=acc_m, is_blackout=(dead or dt > 0.05))
 
             qw, qx, qy, qz = estimator.q
-            writer.writerow([
+            out_dir.writerow(
                 curr_ts,
-                f"{estimator.p[0]:.9f}", f"{estimator.p[1]:.9f}", f"{estimator.p[2]:.9f}",
-                f"{qw:.9f}", f"{qx:.9f}", f"{qy:.9f}", f"{qz:.9f}",
-                f"{estimator.v[0]:.9f}", f"{estimator.v[1]:.9f}", f"{estimator.v[2]:.9f}",
-            ])
+                f"{estimator.p[0]:.9f}", f"{estimator.p[1]:.9f}", f"{estimator.p[2]:.9f},",
+                f"{qw:.9f}", f"{qx:.9f}", f"{qy:.9f}", f"{qz:.9f}, ",
+                f"{estimator.v[0]:.9f}", f"{estimator.v[1]:.9f}", f"{estimator.v[2]:.9f}"
+            )
 
             total_ms += (time.perf_counter() - t0) * 1e3
             count += 1
@@ -301,7 +300,7 @@ def run_trajectory_estimation(imu_csv_path, output_csv_path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("input_imu", help="Input degraded IMU CSV")
-    parser.add_argument("output_est", help="Output estimated trajectory CSV")
+    parser.add_argument("input_imu", help="Input degraded IMU CSV", default="data/imu0.csv")
+    parser.add_argument("output_est", help="Output estimated trajectory CSV", default="estimated_trajectory.txt")
     args = parser.parse_args()
     run_trajectory_estimation(args.input_imu, args.output_est)
