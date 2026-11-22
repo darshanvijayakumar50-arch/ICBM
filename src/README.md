@@ -27,4 +27,5 @@ or simply
 ```bash
 estimate [input] [output]
 ```
-
+By Default input is imu0/data.csv and 
+           output is estimated_trajectory.csv
