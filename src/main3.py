@@ -1,13 +1,15 @@
 # Pragadheesh
 import argparse
 import math
+import statistics
+import time
 from dataclasses import dataclass
 from enum import Enum, IntEnum
-import time
+
+import numpy as np
 
 N = 4000
 G = 9.80665
-
 
 
 @dataclass(frozen=True)
@@ -120,13 +122,11 @@ def analyse_discrete_errors(rec: ImuRecord, prev: ImuRecord, state:EstimatorStat
     elif prev == rec and not blackout:
         state.stuck_frames.add(rec.i)
 
-    if dt > state.dt:
-        n = round(dt/state.dt) - 1
-        if n > 4:
-            state.burst_dropouts.add((rec.i, n))
-        elif n > 1:
-            state.single_dropouts.add(rec.i)
- 
+    n = round(dt / state.dt) - 1
+    if n == 1:
+        state.single_dropouts.add(rec.i)
+    elif n > 1:
+        state.burst_dropouts.add((rec.i, n))
     return blackout
 
 def handle_state(state: EstimatorState, imu: ImuRecord ) -> list[str]:
@@ -152,8 +152,6 @@ def handle_state(state: EstimatorState, imu: ImuRecord ) -> list[str]:
             state.state = EstimatorState.State.FIRST_PASS_RUNNING
 
             state.dt = (state.window[N].time - state.window[0].time) / (N+1)
-            print(state.window[0].time)
-            print(state.window[-1].time)
             print(f"Estimated dt: {state.dt*1e-6} ms")
 
             state.time = state.window[0].time - state.dt
@@ -207,6 +205,7 @@ def run_trajectory_estimation(imu_csv_path, output_csv_path):
     print(f"{state.blackout_length} blackout frames detected")
     print(f"Blackout for {state.blackout_length*state.dt*1e-9:.3f} s")
     print(f"Final state is :{state.state}, starting second pass")
+    
     state.state = EstimatorState.State.SECOND_PASS_INIT
 
     with open(output_csv_path, "w") as outf:
