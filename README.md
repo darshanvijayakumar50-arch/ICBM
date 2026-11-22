@@ -24,11 +24,9 @@ ICBM is a pure-Python, streaming inertial dead-reckoning estimator. It reconstru
 9. [Installation and Setup](#9-installation-and-setup)
 10. [Execution Instructions](#10-execution-instructions)
 11. [Code Explanation](#11-code-explanation)
-12. [Datasets](#12-datasets)
-13. [Results and Outputs](#13-results-and-outputs)
-14. [Challenges and Limitations](#14-challenges-and-limitations)
-15. [Future Improvements](#15-future-improvements)
-16. [References and Provenance](#16-references-and-provenance)
+12. [Results and Outputs](#13-results-and-outputs)
+13. [Future Improvements](#15-future-improvements)
+14. [References and Provenance](#16-references-and-provenance)
 
 ---
 
