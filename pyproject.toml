@@ -6,7 +6,8 @@ readme = "README.md"
 authors = [
     { name = "Pragadheesh A", email = "pragadheeshanand@gmail.com" },
     { name = "Darshan V", email = "darshanvijayakumar50@gmail.com"},
-    { name = "Arthi Y", email = "aryuva2009@gmail.com"}
+    { name = "Arthi Y", email = "aryuva2009@gmail.com"},
+    { name = "C.K.Sarveshwaran", email = "just4sarvesh@gmail.com"}
 ]
 requires-python = ">=3.13"
 dependencies = [
